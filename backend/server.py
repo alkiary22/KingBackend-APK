@@ -1,0 +1,870 @@
+from dotenv import load_dotenv
+from pathlib import Path
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+import os
+import uuid
+import logging
+import bcrypt
+import jwt
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional, Literal
+
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field, EmailStr, ConfigDict
+
+from teams_data import WORLD_CUP_TEAMS
+from fixtures_data import GROUP_FIXTURES, GROUP_LABEL
+from sportsdb import fetch_world_cup_events, normalize_team_code, parse_score, FINISHED_STATUSES
+from content_defaults import DEFAULT_CONTENT
+import asyncio
+
+# ---------- DB ----------
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+JWT_SECRET = os.environ.get('JWT_SECRET', 'change-me')
+JWT_ALG = "HS256"
+JWT_EXPIRE_DAYS = 30
+
+# ---------- App ----------
+app = FastAPI(title="ملك التوقعات API")
+api_router = APIRouter(prefix="/api")
+security = HTTPBearer(auto_error=False)
+
+
+# ---------- Models ----------
+class UserPublic(BaseModel):
+    id: str
+    email: EmailStr
+    name: str
+    role: Literal["user", "supervisor", "admin"] = "user"
+    total_points: int = 0
+    avatar: Optional[str] = None
+    created_at: str
+
+
+class RegisterIn(BaseModel):
+    name: str = Field(min_length=2, max_length=60)
+    email: EmailStr
+    password: str = Field(min_length=6, max_length=128)
+
+
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class AuthOut(BaseModel):
+    user: UserPublic
+    token: str
+
+
+class TeamModel(BaseModel):
+    code: str
+    name_ar: str
+    name_en: str
+    confederation: str
+
+
+class MatchCreate(BaseModel):
+    home_team: str  # team code
+    away_team: str
+    match_date: str  # ISO date string YYYY-MM-DD
+    kickoff: str  # ISO datetime UTC
+    stage: str = "مرحلة المجموعات"
+    group_name: Optional[str] = None
+
+
+class MatchUpdate(BaseModel):
+    home_team: Optional[str] = None
+    away_team: Optional[str] = None
+    match_date: Optional[str] = None
+    kickoff: Optional[str] = None
+    stage: Optional[str] = None
+    group_name: Optional[str] = None
+
+
+class MatchResultIn(BaseModel):
+    home_score: int = Field(ge=0, le=30)
+    away_score: int = Field(ge=0, le=30)
+
+
+class MatchModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    home_team: str
+    away_team: str
+    match_date: str
+    kickoff: str
+    stage: str
+    group_name: Optional[str] = None
+    home_score: Optional[int] = None
+    away_score: Optional[int] = None
+    status: Literal["scheduled", "finished"] = "scheduled"
+    result_updated_at: Optional[str] = None
+    result_source: Optional[str] = None
+
+
+class PredictionIn(BaseModel):
+    match_id: str
+    home_score: int = Field(ge=0, le=30)
+    away_score: int = Field(ge=0, le=30)
+
+
+class PredictionModel(BaseModel):
+    id: str
+    match_id: str
+    user_id: str
+    home_score: int
+    away_score: int
+    points: Optional[int] = None
+    created_at: str
+
+
+class LeaderboardEntry(BaseModel):
+    user_id: str
+    name: str
+    total_points: int
+    predictions_count: int
+    exact_count: int = 0
+    correct_outcome_count: int = 0
+    rank: int
+    avatar: Optional[str] = None
+
+
+# ---------- Auth helpers ----------
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def create_token(user_id: str) -> str:
+    payload = {
+        "sub": user_id,
+        "exp": datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS),
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
+
+async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="غير مصرّح")
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALG])
+        user_id = payload.get("sub")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="انتهت صلاحية الجلسة")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="رمز غير صالح")
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="المستخدم غير موجود")
+    return user
+
+
+async def require_admin(user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="صلاحيات المدير العامة مطلوبة")
+    return user
+
+
+async def require_staff(user=Depends(get_current_user)):
+    """Admin OR supervisor can manage matches, results, view users."""
+    if user.get("role") not in ("admin", "supervisor"):
+        raise HTTPException(status_code=403, detail="صلاحيات الإشراف مطلوبة")
+    return user
+
+
+def user_to_public(doc: dict) -> dict:
+    return {
+        "id": doc["id"],
+        "email": doc["email"],
+        "name": doc["name"],
+        "role": doc.get("role", "user"),
+        "total_points": doc.get("total_points", 0),
+        "avatar": doc.get("avatar"),
+        "created_at": doc["created_at"],
+    }
+
+
+# ---------- Scoring ----------
+def calc_points(pred_h: int, pred_a: int, actual_h: int, actual_a: int) -> int:
+    if pred_h == actual_h and pred_a == actual_a:
+        return 3
+    pred_diff = pred_h - pred_a
+    actual_diff = actual_h - actual_a
+    if (pred_diff > 0 and actual_diff > 0) or \
+       (pred_diff < 0 and actual_diff < 0) or \
+       (pred_diff == 0 and actual_diff == 0):
+        return 1
+    return 0
+
+
+# ---------- Auth endpoints ----------
+@api_router.post("/auth/register", response_model=AuthOut)
+async def register(data: RegisterIn):
+    email = data.email.lower().strip()
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        raise HTTPException(status_code=400, detail="البريد الإلكتروني مسجّل مسبقاً")
+    user_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": user_id,
+        "email": email,
+        "name": data.name.strip(),
+        "password_hash": hash_password(data.password),
+        "role": "user",
+        "total_points": 0,
+        "created_at": now,
+    }
+    await db.users.insert_one(doc)
+    token = create_token(user_id)
+    return {"user": user_to_public(doc), "token": token}
+
+
+@api_router.post("/auth/login", response_model=AuthOut)
+async def login(data: LoginIn):
+    email = data.email.lower().strip()
+    user = await db.users.find_one({"email": email})
+    if not user or not verify_password(data.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="البريد أو كلمة المرور غير صحيحة")
+    token = create_token(user["id"])
+    return {"user": user_to_public(user), "token": token}
+
+
+@api_router.get("/auth/me", response_model=UserPublic)
+async def me(user=Depends(get_current_user)):
+    return user_to_public(user)
+
+
+# ---------- Teams ----------
+@api_router.get("/time")
+async def get_server_time():
+    """Returns authoritative server UTC time. Used by frontend to prevent device-clock tampering."""
+    return {"now": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+
+
+@api_router.get("/teams", response_model=List[TeamModel])
+async def get_teams():
+    return WORLD_CUP_TEAMS
+
+
+# ---------- Matches ----------
+@api_router.get("/matches", response_model=List[MatchModel])
+async def list_matches(date: Optional[str] = None):
+    query = {}
+    if date:
+        query["match_date"] = date
+    matches = await db.matches.find(query, {"_id": 0}).sort("kickoff", 1).to_list(1000)
+    return matches
+
+
+@api_router.post("/matches", response_model=MatchModel)
+async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
+    if data.home_team == data.away_team:
+        raise HTTPException(status_code=400, detail="لا يمكن أن يكون الفريقان متطابقين")
+    codes = {t["code"] for t in WORLD_CUP_TEAMS}
+    if data.home_team not in codes or data.away_team not in codes:
+        raise HTTPException(status_code=400, detail="رمز فريق غير صالح")
+    match = {
+        "id": str(uuid.uuid4()),
+        "home_team": data.home_team,
+        "away_team": data.away_team,
+        "match_date": data.match_date,
+        "kickoff": data.kickoff,
+        "stage": data.stage,
+        "group_name": data.group_name,
+        "home_score": None,
+        "away_score": None,
+        "status": "scheduled",
+    }
+    await db.matches.insert_one(match.copy())
+    return match
+
+
+@api_router.put("/matches/{match_id}", response_model=MatchModel)
+async def update_match(match_id: str, data: MatchUpdate, _staff=Depends(require_staff)):
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(status_code=404, detail="المباراة غير موجودة")
+    updates = {k: v for k, v in data.model_dump(exclude_none=True).items()}
+    if updates:
+        await db.matches.update_one({"id": match_id}, {"$set": updates})
+    updated = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    return updated
+
+
+@api_router.delete("/matches/{match_id}")
+async def delete_match(match_id: str, _staff=Depends(require_staff)):
+    res = await db.matches.delete_one({"id": match_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="المباراة غير موجودة")
+    await db.predictions.delete_many({"match_id": match_id})
+    return {"ok": True}
+
+
+@api_router.post("/matches/{match_id}/result", response_model=MatchModel)
+async def set_match_result(match_id: str, data: MatchResultIn, _staff=Depends(require_staff)):
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(status_code=404, detail="المباراة غير موجودة")
+    await apply_match_result(match_id, data.home_score, data.away_score, source="manual")
+    updated = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    return updated
+
+
+# ---------- Predictions ----------
+@api_router.post("/predictions", response_model=PredictionModel)
+async def submit_prediction(data: PredictionIn, user=Depends(get_current_user)):
+    match = await db.matches.find_one({"id": data.match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(status_code=404, detail="المباراة غير موجودة")
+    if match.get("status") == "finished":
+        raise HTTPException(status_code=400, detail="انتهت المباراة، التوقعات مغلقة")
+    # Lock predictions after kickoff
+    try:
+        kickoff_dt = datetime.fromisoformat(match["kickoff"].replace("Z", "+00:00"))
+        if kickoff_dt <= datetime.now(timezone.utc):
+            raise HTTPException(status_code=400, detail="بدأت المباراة، التوقعات مغلقة")
+    except ValueError:
+        pass
+
+    existing = await db.predictions.find_one(
+        {"match_id": data.match_id, "user_id": user["id"]}, {"_id": 0}
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    if existing:
+        await db.predictions.update_one(
+            {"id": existing["id"]},
+            {"$set": {"home_score": data.home_score, "away_score": data.away_score, "created_at": now}},
+        )
+        out = await db.predictions.find_one({"id": existing["id"]}, {"_id": 0})
+        return out
+    pred = {
+        "id": str(uuid.uuid4()),
+        "match_id": data.match_id,
+        "user_id": user["id"],
+        "home_score": data.home_score,
+        "away_score": data.away_score,
+        "points": None,
+        "created_at": now,
+    }
+    await db.predictions.insert_one(pred.copy())
+    return pred
+
+
+@api_router.get("/predictions/me", response_model=List[PredictionModel])
+async def my_predictions(user=Depends(get_current_user)):
+    preds = await db.predictions.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(10000)
+    return preds
+
+
+# ---------- Leaderboard ----------
+@api_router.get("/leaderboard", response_model=List[LeaderboardEntry])
+async def leaderboard():
+    users = await db.users.find(
+        {"role": {"$ne": "admin"}},
+        {"_id": 0, "id": 1, "name": 1, "total_points": 1, "avatar": 1},
+    ).to_list(10000)
+
+    rows = []
+    for u in users:
+        preds = await db.predictions.find({"user_id": u["id"]}, {"_id": 0}).to_list(2000)
+        scoring = [p for p in preds if isinstance(p.get("points"), int) and p["points"] > 0]
+        exact_count = sum(1 for p in preds if p.get("points") == 3)
+        correct_outcome_count = sum(1 for p in preds if p.get("points") == 1)
+        if scoring:
+            tiebreak = 0.0
+            for p in scoring:
+                try:
+                    ts = datetime.fromisoformat(p["created_at"].replace("Z", "+00:00")).timestamp()
+                except (ValueError, KeyError):
+                    ts = 0.0
+                tiebreak += ts
+        else:
+            tiebreak = float("inf")
+        rows.append({
+            "user_id": u["id"],
+            "name": u["name"],
+            "avatar": u.get("avatar"),
+            "total_points": u.get("total_points", 0),
+            "predictions_count": len(preds),
+            "exact_count": exact_count,
+            "correct_outcome_count": correct_outcome_count,
+            "_tiebreak": tiebreak,
+        })
+
+    # Sort: total_points DESC, then exact_count DESC, then correct_outcome_count DESC,
+    # then earlier predictions (tiebreak ASC)
+    rows.sort(key=lambda r: (-r["total_points"], -r["exact_count"], -r["correct_outcome_count"], r["_tiebreak"]))
+    out = []
+    for i, r in enumerate(rows[:100], start=1):
+        out.append({
+            "user_id": r["user_id"],
+            "name": r["name"],
+            "avatar": r["avatar"],
+            "total_points": r["total_points"],
+            "predictions_count": r["predictions_count"],
+            "exact_count": r["exact_count"],
+            "correct_outcome_count": r["correct_outcome_count"],
+            "rank": i,
+        })
+    return out
+
+
+# ---------- Stats ----------
+@api_router.get("/stats/me")
+async def my_stats(user=Depends(get_current_user)):
+    preds = await db.predictions.find({"user_id": user["id"]}, {"_id": 0}).to_list(10000)
+    total = len(preds)
+    scored = [p for p in preds if isinstance(p.get("points"), int)]
+    correct_exact = sum(1 for p in scored if p["points"] == 3)
+    correct_outcome = sum(1 for p in scored if p["points"] == 1)
+    accuracy = round(((correct_exact + correct_outcome) / len(scored)) * 100, 1) if scored else 0.0
+    # rank
+    rank_users = await db.users.find(
+        {"role": {"$ne": "admin"}}, {"_id": 0, "id": 1, "total_points": 1}
+    ).sort("total_points", -1).to_list(10000)
+    rank = next((i + 1 for i, u in enumerate(rank_users) if u["id"] == user["id"]), None)
+    return {
+        "total_points": user.get("total_points", 0),
+        "total_predictions": total,
+        "correct_exact": correct_exact,
+        "correct_outcome": correct_outcome,
+        "accuracy": accuracy,
+        "rank": rank,
+    }
+
+
+# ---------- Admin: list users ----------
+@api_router.get("/admin/users")
+async def list_users(_staff=Depends(require_staff)):
+    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(10000)
+    # Add predictions count + ensure avatar key for legacy users
+    out = []
+    for u in users:
+        count = await db.predictions.count_documents({"user_id": u["id"]})
+        out.append({**u, "avatar": u.get("avatar"), "predictions_count": count})
+    return out
+
+
+class UserUpdateIn(BaseModel):
+    name: str = Field(min_length=2, max_length=60)
+
+
+class UserRoleIn(BaseModel):
+    role: Literal["user", "supervisor", "admin"]
+
+
+@api_router.put("/admin/users/{user_id}")
+async def admin_update_user(user_id: str, data: UserUpdateIn, admin=Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="المستخدم غير موجود")
+    await db.users.update_one({"id": user_id}, {"$set": {"name": data.name.strip()}})
+    return {"ok": True}
+
+
+@api_router.put("/admin/users/{user_id}/role")
+async def admin_set_role(user_id: str, data: UserRoleIn, admin=Depends(require_admin)):
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="لا يمكنك تغيير صلاحياتك الشخصية")
+    target = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="المستخدم غير موجود")
+    await db.users.update_one({"id": user_id}, {"$set": {"role": data.role}})
+    return {"ok": True, "role": data.role}
+
+
+@api_router.delete("/admin/users/{user_id}")
+async def admin_delete_user(user_id: str, admin=Depends(require_admin)):
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="لا يمكن حذف حسابك")
+    target = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="المستخدم غير موجود")
+    # Cascade delete (any user, including other admins)
+    await db.predictions.delete_many({"user_id": user_id})
+    await db.notifications.delete_many({"user_id": user_id})
+    await db.users.delete_one({"id": user_id})
+    return {"ok": True}
+
+
+# ---------- Admin/Supervisor: view all predictions ----------
+@api_router.get("/admin/predictions")
+async def admin_list_predictions(
+    match_id: Optional[str] = None,
+    _staff=Depends(require_staff),
+):
+    """Admin & supervisor can view predictions made by all members.
+    Optional filter by match_id. Returns enriched rows with user + match info.
+    """
+    query = {}
+    if match_id:
+        query["match_id"] = match_id
+
+    preds = await db.predictions.find(query, {"_id": 0}).sort("created_at", -1).to_list(5000)
+
+    # Build user + match lookup tables to enrich
+    user_ids = list({p["user_id"] for p in preds})
+    match_ids = list({p["match_id"] for p in preds})
+    users = await db.users.find(
+        {"id": {"$in": user_ids}},
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "avatar": 1, "role": 1},
+    ).to_list(10000) if user_ids else []
+    matches = await db.matches.find(
+        {"id": {"$in": match_ids}},
+        {"_id": 0, "id": 1, "home_team": 1, "away_team": 1, "kickoff_utc": 1,
+         "status": 1, "home_score": 1, "away_score": 1, "group": 1},
+    ).to_list(10000) if match_ids else []
+    umap = {u["id"]: u for u in users}
+    mmap = {m["id"]: m for m in matches}
+
+    rows = []
+    for p in preds:
+        u = umap.get(p["user_id"], {})
+        m = mmap.get(p["match_id"], {})
+        rows.append({
+            "id": p.get("id"),
+            "match_id": p["match_id"],
+            "user_id": p["user_id"],
+            "user_name": u.get("name"),
+            "user_email": u.get("email"),
+            "user_avatar": u.get("avatar"),
+            "user_role": u.get("role"),
+            "pred_home": p["home_score"],
+            "pred_away": p["away_score"],
+            "points": p.get("points"),  # may be None when match not yet finished
+            "created_at": p.get("created_at"),
+            "match": {
+                "home_team": m.get("home_team"),
+                "away_team": m.get("away_team"),
+                "kickoff_utc": m.get("kickoff_utc"),
+                "status": m.get("status"),
+                "home_score": m.get("home_score"),
+                "away_score": m.get("away_score"),
+                "group": m.get("group"),
+            } if m else None,
+        })
+    return {"count": len(rows), "items": rows}
+
+
+
+
+# ---------- Auto-sync results (TheSportsDB - free) ----------
+async def create_notifications_for_match(match: dict, home_score: int, away_score: int, source: str):
+    """Create per-user notifications for all users who predicted this match."""
+    predictions = await db.predictions.find({"match_id": match["id"]}, {"_id": 0}).to_list(10000)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    notifs = []
+    for p in predictions:
+        pts = calc_points(p["home_score"], p["away_score"], home_score, away_score)
+        notifs.append({
+            "id": str(uuid.uuid4()),
+            "user_id": p["user_id"],
+            "type": "match_result",
+            "match_id": match["id"],
+            "payload": {
+                "home_team": match["home_team"],
+                "away_team": match["away_team"],
+                "home_score": home_score,
+                "away_score": away_score,
+                "pred_home": p["home_score"],
+                "pred_away": p["away_score"],
+                "points": pts,
+                "source": source,
+            },
+            "read": False,
+            "created_at": now_iso,
+        })
+    if notifs:
+        await db.notifications.insert_many(notifs)
+
+
+async def apply_match_result(match_id: str, home_score: int, away_score: int, source: str = "manual"):
+    """Update match status + recompute prediction points + adjust user totals (delta-aware).
+    Also creates user notifications and stamps update time."""
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        return
+    was_finished = match.get("status") == "finished"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.matches.update_one(
+        {"id": match_id},
+        {"$set": {
+            "home_score": home_score,
+            "away_score": away_score,
+            "status": "finished",
+            "result_updated_at": now_iso,
+            "result_source": source,
+        }},
+    )
+    predictions = await db.predictions.find({"match_id": match_id}, {"_id": 0}).to_list(10000)
+    for p in predictions:
+        pts = calc_points(p["home_score"], p["away_score"], home_score, away_score)
+        old_pts = p.get("points")
+        await db.predictions.update_one({"id": p["id"]}, {"$set": {"points": pts}})
+        delta = pts - (old_pts if isinstance(old_pts, int) else 0)
+        if delta:
+            await db.users.update_one({"id": p["user_id"]}, {"$inc": {"total_points": delta}})
+    # Create notifications only on first-time finalization (avoid spam on edits)
+    if not was_finished:
+        await create_notifications_for_match({**match, "id": match_id}, home_score, away_score, source)
+
+
+async def sync_results_from_thesportsdb():
+    """Pull finished events from TheSportsDB and apply results to matching matches."""
+    sync_start = datetime.now(timezone.utc).isoformat()
+    try:
+        events = await fetch_world_cup_events()
+    except Exception as e:
+        logger.warning(f"TheSportsDB fetch failed: {e}")
+        await db.app_state.update_one(
+            {"key": "last_sync"},
+            {"$set": {"key": "last_sync", "at": sync_start, "ok": False, "error": str(e), "updated": 0}},
+            upsert=True,
+        )
+        return {"updated": 0, "checked": 0, "error": str(e), "synced_at": sync_start}
+
+    updated = 0
+    checked = 0
+    for ev in events:
+        status = (ev.get("strStatus") or "").strip().lower()
+        if status not in FINISHED_STATUSES:
+            continue
+        checked += 1
+        h_score = parse_score(ev.get("intHomeScore"))
+        a_score = parse_score(ev.get("intAwayScore"))
+        if h_score is None or a_score is None:
+            continue
+        h_code = normalize_team_code(ev.get("strHomeTeam"))
+        a_code = normalize_team_code(ev.get("strAwayTeam"))
+        if not h_code or not a_code:
+            continue
+        match = await db.matches.find_one(
+            {"home_team": h_code, "away_team": a_code, "status": {"$ne": "finished"}},
+            {"_id": 0},
+        )
+        if not match:
+            match = await db.matches.find_one(
+                {"home_team": a_code, "away_team": h_code, "status": {"$ne": "finished"}},
+                {"_id": 0},
+            )
+            if match:
+                h_score, a_score = a_score, h_score
+        if not match:
+            continue
+        await apply_match_result(match["id"], h_score, a_score, source="auto")
+        updated += 1
+    if updated:
+        logger.info(f"Auto-sync: applied {updated} results (checked {checked} finished events)")
+    await db.app_state.update_one(
+        {"key": "last_sync"},
+        {"$set": {"key": "last_sync", "at": sync_start, "ok": True, "updated": updated, "checked": checked}},
+        upsert=True,
+    )
+    return {"updated": updated, "checked": checked, "synced_at": sync_start}
+
+
+@api_router.post("/admin/sync-results")
+async def manual_sync_results(_staff=Depends(require_staff)):
+    """Trigger immediate sync of finished match results from TheSportsDB."""
+    return await sync_results_from_thesportsdb()
+
+
+@api_router.get("/admin/last-sync")
+async def get_last_sync(_staff=Depends(require_staff)):
+    doc = await db.app_state.find_one({"key": "last_sync"}, {"_id": 0})
+    return doc or {"at": None, "ok": None, "updated": 0, "checked": 0}
+
+
+# ---------- Site Content (editable text) ----------
+@api_router.get("/content")
+async def get_content():
+    """Public: returns merged content (defaults + overrides)."""
+    overrides_doc = await db.app_state.find_one({"key": "site_content"}, {"_id": 0})
+    overrides = (overrides_doc or {}).get("values", {})
+    merged = {**DEFAULT_CONTENT, **overrides}
+    return {"defaults": DEFAULT_CONTENT, "values": merged}
+
+
+class ContentUpdateIn(BaseModel):
+    values: dict
+
+
+@api_router.put("/admin/content")
+async def update_content(data: ContentUpdateIn, _admin=Depends(require_admin)):
+    """Admin only: overwrites overrides map. Pass empty {} to reset to defaults."""
+    # keep only keys that exist in DEFAULT_CONTENT to prevent garbage
+    clean = {k: str(v) for k, v in data.values.items() if k in DEFAULT_CONTENT}
+    await db.app_state.update_one(
+        {"key": "site_content"},
+        {"$set": {"key": "site_content", "values": clean}},
+        upsert=True,
+    )
+    return {"ok": True, "count": len(clean)}
+
+
+# ---------- Avatar (per-user) ----------
+class AvatarIn(BaseModel):
+    avatar: str = Field(min_length=20, max_length=350_000)  # base64 data URL
+
+
+@api_router.post("/users/me/avatar")
+async def upload_avatar(data: AvatarIn, user=Depends(get_current_user)):
+    """Store base64 data-URL avatar (resized client-side). Max ~250KB raw."""
+    if not data.avatar.startswith("data:image/"):
+        raise HTTPException(status_code=400, detail="صيغة الصورة غير صحيحة")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"avatar": data.avatar}})
+    return {"ok": True}
+
+
+@api_router.delete("/users/me/avatar")
+async def remove_avatar(user=Depends(get_current_user)):
+    await db.users.update_one({"id": user["id"]}, {"$set": {"avatar": None}})
+    return {"ok": True}
+
+
+# ---------- Notifications ----------
+@api_router.get("/notifications/me")
+async def my_notifications(limit: int = 30, user=Depends(get_current_user)):
+    notifs = await db.notifications.find(
+        {"user_id": user["id"]}, {"_id": 0}
+    ).sort("created_at", -1).limit(limit).to_list(limit)
+    unread = await db.notifications.count_documents({"user_id": user["id"], "read": False})
+    return {"items": notifs, "unread": unread}
+
+
+@api_router.post("/notifications/read-all")
+async def mark_all_read(user=Depends(get_current_user)):
+    await db.notifications.update_many(
+        {"user_id": user["id"], "read": False}, {"$set": {"read": True}}
+    )
+    return {"ok": True}
+
+
+@api_router.post("/notifications/{notif_id}/read")
+async def mark_one_read(notif_id: str, user=Depends(get_current_user)):
+    await db.notifications.update_one(
+        {"id": notif_id, "user_id": user["id"]}, {"$set": {"read": True}}
+    )
+    return {"ok": True}
+
+
+async def auto_sync_loop():
+    """Background task: sync every 15 minutes."""
+    await asyncio.sleep(30)  # let app start first
+    while True:
+        try:
+            await sync_results_from_thesportsdb()
+        except Exception as e:
+            logger.error(f"auto_sync_loop iteration error: {e}")
+        await asyncio.sleep(900)  # 15 minutes
+
+
+# ---------- Admin: seed official fixtures ----------
+@api_router.post("/admin/seed-fixtures")
+async def seed_fixtures(_admin=Depends(require_admin)):
+    """Wipes existing matches + predictions and inserts the official
+    72 group-stage fixtures of World Cup 2026."""
+    await db.matches.delete_many({})
+    await db.predictions.delete_many({})
+    await db.notifications.delete_many({})
+    # Reset user totals because predictions are wiped
+    await db.users.update_many({"role": {"$ne": "admin"}}, {"$set": {"total_points": 0}})
+
+    docs = []
+    MECCA = timezone(timedelta(hours=3))
+    for home, away, date_local, time_local, group in GROUP_FIXTURES:
+        # Source times are treated as Mecca/Riyadh local time (UTC+3).
+        # UTC = Mecca - 3h.
+        h, mnt = map(int, time_local.split(":"))
+        y, m, d = map(int, date_local.split("-"))
+        mecca_dt = datetime(y, m, d, h, mnt, tzinfo=MECCA)
+        kickoff_utc = mecca_dt.astimezone(timezone.utc)
+        # match_date = Mecca-local date so users see it on the right day
+        match_date_mecca = mecca_dt.strftime("%Y-%m-%d")
+        docs.append({
+            "id": str(uuid.uuid4()),
+            "home_team": home,
+            "away_team": away,
+            "match_date": match_date_mecca,
+            "kickoff": kickoff_utc.isoformat().replace("+00:00", "Z"),
+            "stage": "مرحلة المجموعات",
+            "group_name": GROUP_LABEL.get(group, group),
+            "home_score": None,
+            "away_score": None,
+            "status": "scheduled",
+        })
+    if docs:
+        await db.matches.insert_many([{**d} for d in docs])
+    return {"inserted": len(docs)}
+
+
+# ---------- Startup ----------
+@app.on_event("startup")
+async def on_startup():
+    await db.users.create_index("email", unique=True)
+    await db.matches.create_index("kickoff")
+    await db.predictions.create_index([("user_id", 1), ("match_id", 1)], unique=True)
+    await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
+    await db.notifications.create_index([("user_id", 1), ("read", 1)])
+
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@malik-tawaqoat.com").lower()
+    admin_password = os.environ.get("ADMIN_PASSWORD", "Admin@2026")
+    existing = await db.users.find_one({"email": admin_email})
+    if not existing:
+        await db.users.insert_one(
+            {
+                "id": str(uuid.uuid4()),
+                "email": admin_email,
+                "name": "المسؤول",
+                "password_hash": hash_password(admin_password),
+                "role": "admin",
+                "total_points": 0,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    else:
+        if not verify_password(admin_password, existing["password_hash"]):
+            await db.users.update_one(
+                {"email": admin_email},
+                {"$set": {"password_hash": hash_password(admin_password), "role": "admin"}},
+            )
+
+    # Start background results auto-sync
+    asyncio.create_task(auto_sync_loop())
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    client.close()
+
+
+app.include_router(api_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=False,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
