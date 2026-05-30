@@ -856,6 +856,48 @@ async def on_shutdown():
     client.close()
 
 
+
+@api_router.get("/live-matches")
+async def live_matches():
+    now = datetime.now(timezone.utc)
+    items = []
+
+    cursor = db.matches.find({}).sort("kickoff", 1)
+    async for m in cursor:
+        kickoff_raw = m.get("kickoff") or m.get("kickoff_utc") or ""
+        status_value = m.get("status", "scheduled")
+
+        try:
+            kickoff_dt = datetime.fromisoformat(str(kickoff_raw).replace("Z", "+00:00"))
+        except Exception:
+            kickoff_dt = None
+
+        is_live = False
+        minute = None
+
+        if kickoff_dt:
+            diff_min = int((now - kickoff_dt).total_seconds() / 60)
+            if 0 <= diff_min <= 130 and status_value != "finished":
+                is_live = True
+                minute = max(1, min(diff_min, 120))
+
+        if is_live or status_value in ["live", "in_progress", "finished"]:
+            items.append({
+                "id": m.get("id"),
+                "home_team": m.get("home_team"),
+                "away_team": m.get("away_team"),
+                "home_score": m.get("home_score"),
+                "away_score": m.get("away_score"),
+                "kickoff": kickoff_raw,
+                "status": "live" if is_live else status_value,
+                "minute": minute,
+                "stage": m.get("stage"),
+                "group_name": m.get("group_name"),
+            })
+
+    return items
+
+
 app.include_router(api_router)
 
 app.add_middleware(
