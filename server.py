@@ -23,6 +23,7 @@ from fixtures_data import GROUP_FIXTURES, GROUP_LABEL
 from sportsdb import fetch_world_cup_events, normalize_team_code, parse_score, FINISHED_STATUSES
 from content_defaults import DEFAULT_CONTENT
 import asyncio
+import httpx
 
 # ---------- DB ----------
 mongo_url = os.environ['MONGO_URL']
