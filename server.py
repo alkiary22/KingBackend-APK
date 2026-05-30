@@ -932,6 +932,54 @@ async def seed_test_live(current_user=Depends(require_admin)):
     }
 
 
+
+@api_router.get("/external/live-matches")
+async def external_live_matches():
+    api_key = os.environ.get("API_FOOTBALL_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="API_FOOTBALL_KEY غير موجود")
+
+    url = "https://v3.football.api-sports.io/fixtures"
+    headers = {"x-apisports-key": api_key}
+
+    async with httpx.AsyncClient(timeout=20) as client_http:
+        r = await client_http.get(url, headers=headers, params={"live": "all"})
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+
+        payload = r.json()
+
+    items = []
+    for item in payload.get("response", []):
+        fixture = item.get("fixture", {})
+        league = item.get("league", {})
+        teams = item.get("teams", {})
+        goals = item.get("goals", {})
+        status = fixture.get("status", {})
+
+        home = teams.get("home", {}) or {}
+        away = teams.get("away", {}) or {}
+
+        items.append({
+            "id": fixture.get("id"),
+            "league": league.get("name"),
+            "country": league.get("country"),
+            "league_logo": league.get("logo"),
+            "home_team": home.get("name"),
+            "away_team": away.get("name"),
+            "home_logo": home.get("logo"),
+            "away_logo": away.get("logo"),
+            "home_score": goals.get("home"),
+            "away_score": goals.get("away"),
+            "elapsed": status.get("elapsed"),
+            "status": status.get("short"),
+            "status_long": status.get("long"),
+            "date": fixture.get("date"),
+        })
+
+    return items
+
+
 app.include_router(api_router)
 
 app.add_middleware(
