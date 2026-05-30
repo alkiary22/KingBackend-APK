@@ -1027,10 +1027,22 @@ async def external_live_matches():
 
         payload = r.json()
 
+    ALLOWED_LIVE_LEAGUES = {
+        "UEFA Champions League",
+        "Premier League",
+        "La Liga",
+        "Bundesliga",
+        "Ligue 1",
+        "Saudi Pro League",
+    }
+
     items = []
     for item in payload.get("response", []):
         fixture = item.get("fixture", {})
         league = item.get("league", {})
+
+        if league.get("name") not in ALLOWED_LIVE_LEAGUES:
+            continue
         teams = item.get("teams", {})
         goals = item.get("goals", {})
         status = fixture.get("status", {})
