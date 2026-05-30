@@ -898,6 +898,40 @@ async def live_matches():
     return items
 
 
+
+@api_router.post("/admin/seed-test-live")
+async def seed_test_live(current_user=Depends(require_admin)):
+    now = datetime.now(timezone.utc)
+    kickoff = (now - timedelta(minutes=35)).isoformat()
+
+    match = {
+        "id": "test-arsenal-psg",
+        "home_team": "arsenal",
+        "away_team": "psg",
+        "home_score": 1,
+        "away_score": 1,
+        "kickoff": kickoff,
+        "match_date": now.date().isoformat(),
+        "status": "live",
+        "stage": "اختبار البث الحي",
+        "group_name": "تجربة",
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+    }
+
+    await db.matches.update_one(
+        {"id": "test-arsenal-psg"},
+        {"$set": match},
+        upsert=True
+    )
+
+    return {
+        "success": True,
+        "message": "تمت إضافة مباراة أرسنال وباريس للاختبار",
+        "match": match
+    }
+
+
 app.include_router(api_router)
 
 app.add_middleware(
