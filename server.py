@@ -858,6 +858,11 @@ async def auto_sync_loop():
 # ---------- Admin: seed official fixtures ----------
 @api_router.post("/admin/seed-fixtures")
 async def seed_fixtures(_admin=Depends(require_admin)):
+    raise HTTPException(
+        status_code=403,
+        detail="تم تعطيل تحميل المباريات لحماية توقعات المستخدمين"
+    )
+
     """Wipes existing matches + predictions and inserts the official
     72 group-stage fixtures of World Cup 2026."""
     await db.matches.delete_many({})
