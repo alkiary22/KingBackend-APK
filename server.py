@@ -389,11 +389,24 @@ async def update_match(match_id: str, data: MatchUpdate, _staff=Depends(require_
 
 @api_router.delete("/matches/{match_id}")
 async def delete_match(match_id: str, _staff=Depends(require_staff)):
-    res = await db.matches.delete_one({"id": match_id})
-    if res.deleted_count == 0:
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
         raise HTTPException(status_code=404, detail="المباراة غير موجودة")
+
+    # خصم نقاط هذه المباراة من المستخدمين قبل حذف توقعاتها
+    predictions = await db.predictions.find({"match_id": match_id}, {"_id": 0}).to_list(10000)
+    for p in predictions:
+        pts = p.get("points")
+        if isinstance(pts, int) and pts != 0:
+            await db.users.update_one(
+                {"id": p["user_id"]},
+                {"$inc": {"total_points": -pts}}
+            )
+
+    await db.matches.delete_one({"id": match_id})
     await db.predictions.delete_many({"match_id": match_id})
-    return {"ok": True}
+
+    return {"ok": True, "removed_predictions": len(predictions)}
 
 
 @api_router.post("/matches/{match_id}/result", response_model=MatchModel)
