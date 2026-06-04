@@ -1075,6 +1075,85 @@ async def external_live_matches():
     return items
 
 
+
+@api_router.post("/admin/import-new-fixtures")
+async def import_new_fixtures(_admin=Depends(require_admin)):
+    """
+    يستورد مباريات كأس العالم الجديدة فقط من TheSportsDB
+    بدون حذف أي مباراة أو توقع أو نقاط.
+    """
+    try:
+        events = await fetch_world_cup_events()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"فشل جلب المباريات: {e}")
+
+    created = 0
+    skipped = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    for ev in events:
+        h_code = normalize_team_code(ev.get("strHomeTeam"))
+        a_code = normalize_team_code(ev.get("strAwayTeam"))
+
+        if not h_code or not a_code:
+            skipped += 1
+            continue
+
+        existing = await db.matches.find_one({
+            "$or": [
+                {"home_team": h_code, "away_team": a_code},
+                {"home_team": a_code, "away_team": h_code}
+            ]
+        })
+
+        if existing:
+            skipped += 1
+            continue
+
+        timestamp = ev.get("strTimestamp")
+        date_event = ev.get("dateEvent")
+        time_event = ev.get("strTime") or "00:00:00"
+
+        try:
+            if timestamp:
+                kickoff = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            elif date_event:
+                kickoff = datetime.fromisoformat(f"{date_event}T{time_event}+00:00")
+            else:
+                kickoff = datetime.now(timezone.utc)
+        except Exception:
+            kickoff = datetime.now(timezone.utc)
+
+        stage = ev.get("strRound") or ev.get("strStage") or "كأس العالم"
+
+        doc = {
+            "id": str(uuid.uuid4()),
+            "home_team": h_code,
+            "away_team": a_code,
+            "match_date": kickoff.date().isoformat(),
+            "kickoff_utc": kickoff.astimezone(timezone.utc).isoformat(),
+            "stage": stage,
+            "group_name": "",
+            "status": "scheduled",
+            "home_score": None,
+            "away_score": None,
+            "result_source": None,
+            "result_updated_at": None,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+
+        await db.matches.insert_one(doc)
+        created += 1
+
+    return {
+        "success": True,
+        "created": created,
+        "skipped": skipped,
+        "message": "تم استيراد مباريات كأس العالم الجديدة بدون حذف التوقعات"
+    }
+
+
 app.include_router(api_router)
 
 app.add_middleware(
