@@ -7,6 +7,10 @@ WORLD_CUP_TEAMS = [
     {"code": "ca", "name_ar": "كندا", "name_en": "Canada", "confederation": "CONCACAF"},
     {"code": "mx", "name_ar": "المكسيك", "name_en": "Mexico", "confederation": "CONCACAF"},
 
+    {"code": "ye", "name_ar": "اليمن", "name_en": "Yemen", "confederation": "AFC"},
+    {"code": "lb", "name_ar": "لبنان", "name_en": "Lebanon", "confederation": "AFC"},
+
+
     # UEFA
     {"code": "gb-eng", "name_ar": "إنجلترا", "name_en": "England", "confederation": "UEFA"},
     {"code": "fr", "name_ar": "فرنسا", "name_en": "France", "confederation": "UEFA"},
