@@ -25,6 +25,16 @@ from content_defaults import DEFAULT_CONTENT
 import asyncio
 import httpx
 
+# Firebase Cloud Messaging
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging
+except Exception:
+    firebase_admin = None
+    credentials = None
+    messaging = None
+
+
 
 TEAM_AR_NAMES = {
     "Arsenal": "أرسنال",
@@ -141,6 +151,9 @@ class LoginIn(BaseModel):
 
 class AuthOut(BaseModel):
     user: UserPublic
+    token: str
+
+class PushTokenIn(BaseModel):
     token: str
 
 
@@ -685,6 +698,14 @@ async def create_notifications_for_match(match: dict, home_score: int, away_scor
         })
     if notifs:
         await db.notifications.insert_many(notifs)
+        for n in notifs:
+            pts = n.get("payload", {}).get("points", 0)
+            await send_push_to_user(
+                n["user_id"],
+                "نتيجة المباراة 🏁",
+                f"تم احتساب نتيجتك: {pts} نقطة",
+                {"type": "match_result", "match_id": n["match_id"]}
+            )
 
 
 async def apply_match_result(match_id: str, home_score: int, away_score: int, source: str = "manual"):
@@ -831,6 +852,73 @@ async def remove_avatar(user=Depends(get_current_user)):
     return {"ok": True}
 
 
+# ---------- Push Notifications ----------
+FCM_READY = False
+
+def init_fcm():
+    global FCM_READY
+    if FCM_READY:
+        return True
+    if firebase_admin is None:
+        logger.warning("firebase-admin not installed")
+        return False
+    key_path = ROOT_DIR / "serviceAccountKey.json"
+    if not key_path.exists():
+        logger.warning("serviceAccountKey.json not found")
+        return False
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(str(key_path))
+        firebase_admin.initialize_app(cred)
+    FCM_READY = True
+    return True
+
+async def send_push_to_user(user_id: str, title: str, body: str, data: dict | None = None):
+    if not init_fcm():
+        return {"sent": 0, "error": "FCM not ready"}
+
+    tokens = await db.push_tokens.find({"user_id": user_id}, {"_id": 0}).to_list(1000)
+    sent = 0
+
+    for item in tokens:
+        token = item.get("token")
+        if not token:
+            continue
+        try:
+            msg = messaging.Message(
+                notification=messaging.Notification(title=title, body=body),
+                data={k: str(v) for k, v in (data or {}).items()},
+                token=token,
+            )
+            messaging.send(msg)
+            sent += 1
+        except Exception as e:
+            logger.warning(f"FCM send failed: {e}")
+            await db.push_tokens.delete_one({"token": token})
+
+    return {"sent": sent}
+
+@api_router.post("/push/register-token")
+async def register_push_token(data: PushTokenIn, user=Depends(get_current_user)):
+    await db.push_tokens.update_one(
+        {"token": data.token},
+        {"$set": {
+            "token": data.token,
+            "user_id": user["id"],
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }},
+        upsert=True
+    )
+    return {"ok": True}
+
+@api_router.post("/push/test")
+async def test_push(user=Depends(get_current_user)):
+    return await send_push_to_user(
+        user["id"],
+        "ملك التوقعات",
+        "تم تفعيل الإشعارات بنجاح ✅",
+        {"type": "test"}
+    )
+
 # ---------- Notifications ----------
 @api_router.get("/notifications/me")
 async def my_notifications(limit: int = 30, user=Depends(get_current_user)):
@@ -920,6 +1008,8 @@ async def on_startup():
     await db.predictions.create_index([("user_id", 1), ("match_id", 1)], unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.notifications.create_index([("user_id", 1), ("read", 1)])
+    await db.push_tokens.create_index("token", unique=True)
+    await db.push_tokens.create_index("user_id")
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@malik-tawaqoat.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "Admin@2026")
