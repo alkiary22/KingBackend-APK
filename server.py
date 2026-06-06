@@ -1257,6 +1257,56 @@ async def import_new_fixtures(_admin=Depends(require_admin)):
     }
 
 
+
+class ChatMessageIn(BaseModel):
+    text: str
+
+@api_router.get("/chat/messages")
+async def get_chat_messages(_user=Depends(get_current_user)):
+    rows = await db.chat_messages.find(
+        {},
+        {"_id": 0}
+    ).sort("created_at", -1).limit(50).to_list(50)
+
+    return list(reversed(rows))
+
+@api_router.post("/chat/messages")
+async def send_chat_message(data: ChatMessageIn, user=Depends(get_current_user)):
+    text = data.text.strip()
+
+    if not text:
+        raise HTTPException(status_code=400, detail="الرسالة فارغة")
+
+    if len(text) > 300:
+        raise HTTPException(status_code=400, detail="الرسالة طويلة جداً")
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "user_name": user.get("name", "مستخدم"),
+        "user_avatar": user.get("avatar"),
+        "text": text,
+        "created_at": now,
+    }
+
+    await db.chat_messages.insert_one(doc)
+
+    return {
+        "success": True,
+        "message": doc
+    }
+
+@api_router.delete("/chat/messages/{message_id}")
+async def delete_chat_message(message_id: str, staff=Depends(require_staff)):
+    res = await db.chat_messages.delete_one({"id": message_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="الرسالة غير موجودة")
+
+    return {"success": True}
+
+
 app.include_router(api_router)
 
 app.add_middleware(
