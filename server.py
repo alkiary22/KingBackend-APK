@@ -1003,11 +1003,27 @@ async def seed_fixtures(_admin=Depends(require_admin)):
 # ---------- Startup ----------
 @app.on_event("startup")
 async def on_startup():
+    # Indexes for faster login, matches, predictions, leaderboard, notifications and chat
     await db.users.create_index("email", unique=True)
-    await db.matches.create_index("kickoff")
+    await db.users.create_index("role")
+    await db.users.create_index([("role", 1), ("total_points", -1)])
+
+    await db.matches.create_index("kickoff_utc")
+    await db.matches.create_index("match_date")
+    await db.matches.create_index("status")
+    await db.matches.create_index([("match_date", 1), ("kickoff_utc", 1)])
+    await db.matches.create_index([("home_team", 1), ("away_team", 1)])
+
     await db.predictions.create_index([("user_id", 1), ("match_id", 1)], unique=True)
+    await db.predictions.create_index("user_id")
+    await db.predictions.create_index("match_id")
+    await db.predictions.create_index([("match_id", 1), ("points", 1)])
+
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.notifications.create_index([("user_id", 1), ("read", 1)])
+
+    await db.chat_messages.create_index("created_at")
+
     await db.push_tokens.create_index("token", unique=True)
     await db.push_tokens.create_index("user_id")
 
