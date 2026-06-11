@@ -1158,6 +1158,8 @@ async def external_live_matches():
         "Bundesliga",
         "Ligue 1",
         "Saudi Pro League",
+        "FIFA World Cup",
+        "World Cup",
     }
 
     items = []
