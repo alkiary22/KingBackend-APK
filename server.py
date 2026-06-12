@@ -1345,6 +1345,42 @@ async def update_match_time(match_id: str, data: MatchTimeUpdate, _staff=Depends
         "message": "تم تعديل وقت المباراة بدون حذف التوقعات",
         "kickoff": data.kickoff
     }
+
+class MatchTimeByTeamsIn(BaseModel):
+    home_team: str
+    away_team: str
+    kickoff: str
+
+@api_router.patch("/admin/fix-match-time")
+async def fix_match_time(data: MatchTimeByTeamsIn, _staff=Depends(require_staff)):
+    match = await db.matches.find_one({
+        "home_team": data.home_team,
+        "away_team": data.away_team
+    }, {"_id": 0})
+
+    if not match:
+        match = await db.matches.find_one({
+            "home_team": data.away_team,
+            "away_team": data.home_team
+        }, {"_id": 0})
+
+    if not match:
+        raise HTTPException(status_code=404, detail="المباراة غير موجودة")
+
+    await db.matches.update_one(
+        {"id": match["id"]},
+        {"$set": {"kickoff": data.kickoff}}
+    )
+
+    return {
+        "success": True,
+        "message": "تم تعديل وقت المباراة بدون حذف التوقعات",
+        "match_id": match["id"],
+        "kickoff": data.kickoff
+    }
+}
+
+
 app.include_router(api_router)
 
 app.add_middleware(
