@@ -1378,7 +1378,6 @@ async def fix_match_time(data: MatchTimeByTeamsIn, _staff=Depends(require_staff)
         "match_id": match["id"],
         "kickoff": data.kickoff
     }
-}
 
 
 app.include_router(api_router)
