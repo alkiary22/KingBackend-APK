@@ -1345,7 +1345,7 @@ async def update_match_time(match_id: str, data: MatchTimeUpdate, _staff=Depends
         "message": "تم تعديل وقت المباراة بدون حذف التوقعات",
         "kickoff": data.kickoff
     }
-\n\napp.include_router(api_router)
+app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
