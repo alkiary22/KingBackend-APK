@@ -1325,7 +1325,27 @@ async def delete_chat_message(message_id: str, staff=Depends(require_staff)):
     return {"success": True}
 
 
-app.include_router(api_router)
+
+class MatchTimeUpdate(BaseModel):
+    kickoff: str
+
+@api_router.patch("/admin/matches/{match_id}/time")
+async def update_match_time(match_id: str, data: MatchTimeUpdate, _staff=Depends(require_staff)):
+    match = await db.matches.find_one({"id": match_id}, {"_id": 0})
+    if not match:
+        raise HTTPException(status_code=404, detail="المباراة غير موجودة")
+
+    await db.matches.update_one(
+        {"id": match_id},
+        {"$set": {"kickoff": data.kickoff}}
+    )
+
+    return {
+        "success": True,
+        "message": "تم تعديل وقت المباراة بدون حذف التوقعات",
+        "kickoff": data.kickoff
+    }
+\n\napp.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
