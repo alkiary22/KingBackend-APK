@@ -768,6 +768,8 @@ async def sync_results_from_thesportsdb():
         a_code = normalize_team_code(ev.get("strAwayTeam"))
         if not h_code or not a_code:
             continue
+        logger.info(f"SYNC TRY: {ev.get('strHomeTeam')}({h_code}) vs {ev.get('strAwayTeam')}({a_code}) score {h_score}-{a_score}")
+
         match = await db.matches.find_one(
             {"home_team": h_code, "away_team": a_code, "status": {"$ne": "finished"}},
             {"_id": 0},
@@ -780,6 +782,7 @@ async def sync_results_from_thesportsdb():
             if match:
                 h_score, a_score = a_score, h_score
         if not match:
+            logger.info(f"SYNC NO MATCH: {h_code} vs {a_code}")
             continue
         await apply_match_result(match["id"], h_score, a_score, source="auto")
         updated += 1
@@ -791,6 +794,16 @@ async def sync_results_from_thesportsdb():
         upsert=True,
     )
     return {"updated": updated, "checked": checked, "synced_at": sync_start}
+
+
+# AUTO_SYNC_RESULTS_TASK
+async def auto_sync_results_loop():
+    while True:
+        try:
+            await sync_results_from_thesportsdb()
+        except Exception as e:
+            logger.warning(f"Auto sync loop failed: {e}")
+        await asyncio.sleep(300)
 
 
 @api_router.post("/admin/sync-results")
@@ -1378,6 +1391,12 @@ async def fix_match_time(data: MatchTimeByTeamsIn, _staff=Depends(require_staff)
         "match_id": match["id"],
         "kickoff": data.kickoff
     }
+
+
+@app.on_event("startup")
+async def start_auto_sync_results():
+    asyncio.create_task(auto_sync_results_loop())
+
 
 app.include_router(api_router)
 
