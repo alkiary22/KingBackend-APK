@@ -820,7 +820,7 @@ async def test_api_football():
 
     url = "https://v3.football.api-sports.io/fixtures"
     headers = {"x-apisports-key": api_key}
-    params = {"date": datetime.now(timezone.utc).date().isoformat()}
+    params = {"date": "2026-06-15"}
 
     async with httpx.AsyncClient(timeout=20) as client_http:
         r = await client_http.get(url, headers=headers, params=params)
