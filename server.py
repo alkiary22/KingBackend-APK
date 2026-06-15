@@ -812,6 +812,45 @@ async def manual_sync_results(_staff=Depends(require_staff)):
     return await sync_results_from_thesportsdb()
 
 
+@api_router.get("/admin/test-api-football")
+async def test_api_football(_staff=Depends(require_staff)):
+    api_key = os.environ.get("API_FOOTBALL_KEY")
+    if not api_key:
+        return {"ok": False, "error": "API_FOOTBALL_KEY غير موجود"}
+
+    url = "https://v3.football.api-sports.io/fixtures"
+    headers = {"x-apisports-key": api_key}
+    params = {"date": datetime.now(timezone.utc).date().isoformat()}
+
+    async with httpx.AsyncClient(timeout=20) as client_http:
+        r = await client_http.get(url, headers=headers, params=params)
+
+    if r.status_code != 200:
+        return {"ok": False, "status": r.status_code, "body": r.text[:500]}
+
+    data = r.json()
+    items = []
+
+    for item in data.get("response", [])[:20]:
+        fixture = item.get("fixture", {}) or {}
+        status = fixture.get("status", {}) or {}
+        teams = item.get("teams", {}) or {}
+        goals = item.get("goals", {}) or {}
+        league = item.get("league", {}) or {}
+
+        items.append({
+            "league": league.get("name"),
+            "home": (teams.get("home") or {}).get("name"),
+            "away": (teams.get("away") or {}).get("name"),
+            "home_score": goals.get("home"),
+            "away_score": goals.get("away"),
+            "status": status.get("short"),
+            "status_long": status.get("long"),
+        })
+
+    return {"ok": True, "count": len(data.get("response", [])), "items": items}
+
+
 @api_router.get("/admin/last-sync")
 async def get_last_sync(_staff=Depends(require_staff)):
     doc = await db.app_state.find_one({"key": "last_sync"}, {"_id": 0})
