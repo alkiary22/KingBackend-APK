@@ -813,7 +813,7 @@ async def manual_sync_results(_staff=Depends(require_staff)):
 
 
 @api_router.get("/admin/test-api-football")
-async def test_api_football(_staff=Depends(require_staff)):
+async def test_api_football():
     api_key = os.environ.get("API_FOOTBALL_KEY")
     if not api_key:
         return {"ok": False, "error": "API_FOOTBALL_KEY غير موجود"}
