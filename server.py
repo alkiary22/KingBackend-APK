@@ -481,51 +481,87 @@ async def my_predictions(user=Depends(get_current_user)):
 # ---------- Leaderboard ----------
 @api_router.get("/leaderboard", response_model=List[LeaderboardEntry])
 async def leaderboard():
-    users = await db.users.find(
-        {"role": {"$ne": "admin"}},
-        {"_id": 0, "id": 1, "name": 1, "total_points": 1, "avatar": 1},
-    ).to_list(10000)
+    pipeline = [
+        {"$match": {"role": {"$ne": "admin"}}},
+        {"$project": {
+            "_id": 0,
+            "user_id": "$id",
+            "name": 1,
+            "avatar": 1,
+            "total_points": {"$ifNull": ["$total_points", 0]},
+        }},
+        {"$lookup": {
+            "from": "predictions",
+            "let": {"uid": "$user_id"},
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": ["$user_id", "$$uid"]}}},
+                {"$group": {
+                    "_id": None,
+                    "predictions_count": {"$sum": 1},
+                    "exact_count": {
+                        "$sum": {"$cond": [{"$eq": ["$points", 3]}, 1, 0]}
+                    },
+                    "correct_outcome_count": {
+                        "$sum": {"$cond": [{"$eq": ["$points", 1]}, 1, 0]}
+                    },
+                    "tiebreak": {
+                        "$sum": {
+                            "$cond": [
+                                {"$gt": ["$points", 0]},
+                                {"$toLong": {"$ifNull": [{"$toDate": "$created_at"}, "1970-01-01T00:00:00Z"]}},
+                                0
+                            ]
+                        }
+                    }
+                }}
+            ],
+            "as": "stats"
+        }},
+        {"$addFields": {
+            "stats": {"$arrayElemAt": ["$stats", 0]}
+        }},
+        {"$addFields": {
+            "predictions_count": {"$ifNull": ["$stats.predictions_count", 0]},
+            "exact_count": {"$ifNull": ["$stats.exact_count", 0]},
+            "correct_outcome_count": {"$ifNull": ["$stats.correct_outcome_count", 0]},
+            "_tiebreak": {
+                "$cond": [
+                    {"$gt": [{"$ifNull": ["$stats.tiebreak", 0]}, 0]},
+                    {"$ifNull": ["$stats.tiebreak", 0]},
+                    999999999999999999
+                ]
+            }
+        }},
+        {"$sort": {
+            "total_points": -1,
+            "exact_count": -1,
+            "correct_outcome_count": -1,
+            "_tiebreak": 1
+        }},
+        {"$limit": 100},
+        {"$project": {
+            "user_id": 1,
+            "name": 1,
+            "avatar": 1,
+            "total_points": 1,
+            "predictions_count": 1,
+            "exact_count": 1,
+            "correct_outcome_count": 1
+        }}
+    ]
 
-    rows = []
-    for u in users:
-        preds = await db.predictions.find({"user_id": u["id"]}, {"_id": 0}).to_list(2000)
-        scoring = [p for p in preds if isinstance(p.get("points"), int) and p["points"] > 0]
-        exact_count = sum(1 for p in preds if p.get("points") == 3)
-        correct_outcome_count = sum(1 for p in preds if p.get("points") == 1)
-        if scoring:
-            tiebreak = 0.0
-            for p in scoring:
-                try:
-                    ts = datetime.fromisoformat(p["created_at"].replace("Z", "+00:00")).timestamp()
-                except (ValueError, KeyError):
-                    ts = 0.0
-                tiebreak += ts
-        else:
-            tiebreak = float("inf")
-        rows.append({
-            "user_id": u["id"],
-            "name": u["name"],
-            "avatar": u.get("avatar"),
-            "total_points": u.get("total_points", 0),
-            "predictions_count": len(preds),
-            "exact_count": exact_count,
-            "correct_outcome_count": correct_outcome_count,
-            "_tiebreak": tiebreak,
-        })
+    rows = await db.users.aggregate(pipeline).to_list(100)
 
-    # Sort: total_points DESC, then exact_count DESC, then correct_outcome_count DESC,
-    # then earlier predictions (tiebreak ASC)
-    rows.sort(key=lambda r: (-r["total_points"], -r["exact_count"], -r["correct_outcome_count"], r["_tiebreak"]))
     out = []
-    for i, r in enumerate(rows[:100], start=1):
+    for i, r in enumerate(rows, start=1):
         out.append({
             "user_id": r["user_id"],
             "name": r["name"],
-            "avatar": r["avatar"],
-            "total_points": r["total_points"],
-            "predictions_count": r["predictions_count"],
-            "exact_count": r["exact_count"],
-            "correct_outcome_count": r["correct_outcome_count"],
+            "avatar": r.get("avatar"),
+            "total_points": int(r.get("total_points", 0)),
+            "predictions_count": int(r.get("predictions_count", 0)),
+            "exact_count": int(r.get("exact_count", 0)),
+            "correct_outcome_count": int(r.get("correct_outcome_count", 0)),
             "rank": i,
         })
     return out
