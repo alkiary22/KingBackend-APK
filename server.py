@@ -1007,6 +1007,103 @@ async def test_push(user=Depends(get_current_user)):
         {"type": "test"}
     )
 
+
+async def send_match_start_reminders(minutes_before: int = 15):
+    """Send one reminder to all users for matches starting within the next minutes_before."""
+    now = datetime.now(timezone.utc)
+    target = now + timedelta(minutes=minutes_before)
+
+    matches = await db.matches.find(
+        {"status": {"$nin": ["live", "started", "finished", "ended"]}},
+        {"_id": 0}
+    ).to_list(10000)
+
+    reminded = 0
+    checked = 0
+
+    users = await db.users.find({}, {"_id": 0, "id": 1}).to_list(10000)
+    user_ids = [u.get("id") for u in users if u.get("id")]
+
+    for match in matches:
+        kickoff = match.get("kickoff_utc") or match.get("kickoff")
+        if not kickoff:
+            continue
+
+        try:
+            dt = datetime.fromisoformat(str(kickoff).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+
+        # Match starts between now and 15 minutes from now
+        if not (now <= dt <= target):
+            continue
+
+        checked += 1
+        match_id = match.get("id")
+        reminder_key = f"match_start_15_{match_id}"
+
+        exists = await db.notifications.find_one(
+            {"type": "match_start_reminder", "match_id": match_id, "payload.reminder_key": reminder_key},
+            {"_id": 0, "id": 1}
+        )
+        if exists:
+            continue
+
+        home = match.get("home_team")
+        away = match.get("away_team")
+        now_iso = now.isoformat()
+
+        notifs = []
+        for uid in user_ids:
+            notifs.append({
+                "id": str(uuid.uuid4()),
+                "user_id": uid,
+                "type": "match_start_reminder",
+                "match_id": match_id,
+                "payload": {
+                    "home_team": home,
+                    "away_team": away,
+                    "kickoff": kickoff,
+                    "minutes_before": minutes_before,
+                    "reminder_key": reminder_key,
+                },
+                "read": False,
+                "created_at": now_iso,
+            })
+
+        if notifs:
+            await db.notifications.insert_many(notifs)
+
+        for uid in user_ids:
+            await send_push_to_user(
+                uid,
+                "اقتربت المباراة ⏰",
+                f"تبقّى {minutes_before} دقيقة على بداية المباراة. لا تنسَ توقعك!",
+                {"type": "match_start_reminder", "match_id": match_id}
+            )
+
+        reminded += 1
+
+    return {"ok": True, "checked_matches": checked, "reminded_matches": reminded, "users": len(user_ids)}
+
+
+@api_router.post("/admin/send-match-reminders")
+async def admin_send_match_reminders(_staff=Depends(require_staff)):
+    """Admin/staff: send reminders for matches starting within 15 minutes."""
+    return await send_match_start_reminders(15)
+
+
+# AUTO_MATCH_REMINDERS_TASK
+async def auto_match_reminders_loop():
+    while True:
+        try:
+            await send_match_start_reminders(15)
+        except Exception as e:
+            logger.warning(f"Auto match reminders loop failed: {e}")
+        await asyncio.sleep(60)
+
 # ---------- Notifications ----------
 @api_router.get("/notifications/me")
 async def my_notifications(limit: int = 30, user=Depends(get_current_user)):
@@ -1471,6 +1568,7 @@ async def fix_match_time(data: MatchTimeByTeamsIn, _staff=Depends(require_staff)
 @app.on_event("startup")
 async def start_auto_sync_results():
     asyncio.create_task(auto_sync_results_loop())
+    asyncio.create_task(auto_match_reminders_loop())
 
 
 app.include_router(api_router)
