@@ -1008,6 +1008,18 @@ async def test_push(user=Depends(get_current_user)):
     )
 
 
+@api_router.get("/push/me")
+async def my_push_tokens(user=Depends(get_current_user)):
+    tokens = await db.push_tokens.find(
+        {"user_id": user["id"]},
+        {"_id": 0, "token": 1, "updated_at": 1}
+    ).to_list(100)
+    return {
+        "count": len(tokens),
+        "items": tokens
+    }
+
+
 async def send_match_start_reminders(minutes_before: int = 15):
     """Send one reminder to all users for matches starting within the next minutes_before."""
     now = datetime.now(timezone.utc)
