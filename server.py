@@ -992,6 +992,18 @@ def init_fcm():
     FCM_READY = True
     return True
 
+
+def build_push_link(path: str | None = None):
+    base = os.environ.get("FRONTEND_URL", "https://king-of-predictions-17019.web.app").rstrip("/")
+    target = str(path or "/").strip()
+    if not target:
+        target = "/"
+    if target.startswith("http://") or target.startswith("https://"):
+        return target
+    if not target.startswith("/"):
+        target = "/" + target
+    return base + target
+
 async def send_push_to_user(user_id: str, title: str, body: str, data: dict | None = None):
     if not init_fcm():
         return {"sent": 0, "error": "FCM not ready"}
@@ -1004,9 +1016,14 @@ async def send_push_to_user(user_id: str, title: str, body: str, data: dict | No
         if not token:
             continue
         try:
+            payload_data = {k: str(v) for k, v in (data or {}).items()}
+            link = build_push_link(payload_data.get("url") or payload_data.get("link") or "/")
             msg = messaging.Message(
                 notification=messaging.Notification(title=title, body=body),
-                data={k: str(v) for k, v in (data or {}).items()},
+                data=payload_data,
+                webpush=messaging.WebpushConfig(
+                    fcm_options=messaging.WebpushFCMOptions(link=link)
+                ),
                 token=token,
             )
             messaging.send(msg)
@@ -1049,9 +1066,14 @@ async def send_push_to_all_users(title: str, body: str, data: dict | None = None
 
     for token in unique_tokens:
         try:
+            payload_data = {k: str(v) for k, v in (data or {}).items()}
+            link = build_push_link(payload_data.get("url") or payload_data.get("link") or "/")
             msg = messaging.Message(
                 notification=messaging.Notification(title=title, body=body),
-                data={k: str(v) for k, v in (data or {}).items()},
+                data=payload_data,
+                webpush=messaging.WebpushConfig(
+                    fcm_options=messaging.WebpushFCMOptions(link=link)
+                ),
                 token=token,
             )
             messaging.send(msg)
