@@ -1017,6 +1017,58 @@ async def send_push_to_user(user_id: str, title: str, body: str, data: dict | No
 
     return {"sent": sent}
 
+
+class BroadcastPushIn(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    body: str = Field(min_length=1, max_length=500)
+    url: str | None = None
+
+
+async def send_push_to_all_users(title: str, body: str, data: dict | None = None):
+    if not init_fcm():
+        return {"sent": 0, "failed": 0, "users": 0, "error": "FCM not ready"}
+
+    tokens = await db.push_tokens.find({}, {"_id": 0, "token": 1, "user_id": 1}).to_list(50000)
+
+    seen = set()
+    unique_tokens = []
+    user_ids = set()
+
+    for item in tokens:
+        token = item.get("token")
+        uid = item.get("user_id")
+        if uid:
+            user_ids.add(uid)
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        unique_tokens.append(token)
+
+    sent = 0
+    failed = 0
+
+    for token in unique_tokens:
+        try:
+            msg = messaging.Message(
+                notification=messaging.Notification(title=title, body=body),
+                data={k: str(v) for k, v in (data or {}).items()},
+                token=token,
+            )
+            messaging.send(msg)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.warning(f"FCM broadcast failed: {e}")
+            await db.push_tokens.delete_one({"token": token})
+
+    return {
+        "sent": sent,
+        "failed": failed,
+        "tokens": len(unique_tokens),
+        "users": len(user_ids),
+    }
+
+
 @api_router.post("/push/register-token")
 async def register_push_token(data: PushTokenIn, user=Depends(get_current_user)):
     await db.push_tokens.update_one(
@@ -1038,6 +1090,17 @@ async def test_push(user=Depends(get_current_user)):
         "تم تفعيل الإشعارات بنجاح ✅",
         {"type": "test"}
     )
+
+
+
+@api_router.post("/admin/push/broadcast")
+async def admin_broadcast_push(data: BroadcastPushIn, _staff=Depends(require_staff)):
+    payload = {"type": "broadcast"}
+    if data.url:
+        payload["url"] = data.url
+
+    result = await send_push_to_all_users(data.title, data.body, payload)
+    return {"ok": True, **result}
 
 
 @api_router.get("/push/me")
