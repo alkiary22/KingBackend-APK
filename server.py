@@ -607,6 +607,11 @@ class UserUpdateIn(BaseModel):
     name: str = Field(min_length=2, max_length=60)
 
 
+
+class AdminPasswordResetIn(BaseModel):
+    new_password: str = Field(min_length=6, max_length=100)
+
+
 class UserRoleIn(BaseModel):
     role: Literal["user", "supervisor", "admin"]
 
@@ -617,6 +622,20 @@ async def admin_update_user(user_id: str, data: UserUpdateIn, admin=Depends(requ
     if not target:
         raise HTTPException(status_code=404, detail="المستخدم غير موجود")
     await db.users.update_one({"id": user_id}, {"$set": {"name": data.name.strip()}})
+    return {"ok": True}
+
+
+
+@api_router.put("/admin/users/{user_id}/password")
+async def admin_reset_user_password(user_id: str, data: AdminPasswordResetIn, admin=Depends(require_admin)):
+    user_doc = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="المستخدم غير موجود")
+
+    await db.users.update_one(
+        {"id": user_id},
+        {"$set": {"password_hash": hash_password(data.new_password)}}
+    )
     return {"ok": True}
 
 
