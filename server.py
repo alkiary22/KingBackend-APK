@@ -920,6 +920,38 @@ async def update_content(data: ContentUpdateIn, _admin=Depends(require_admin)):
     return {"ok": True, "count": len(clean)}
 
 
+# ---------- Ads Slider ----------
+class AdsSliderIn(BaseModel):
+    images: list[str] = Field(default_factory=list, max_length=8)
+
+
+@api_router.get("/ads-slider")
+async def get_ads_slider():
+    doc = await db.app_state.find_one({"key": "ads_slider"}, {"_id": 0})
+    images = (doc or {}).get("images") or []
+    return {"images": images}
+
+
+@api_router.put("/admin/ads-slider")
+async def update_ads_slider(data: AdsSliderIn, _admin=Depends(require_admin)):
+    clean = []
+    for img in data.images[:8]:
+        if not isinstance(img, str):
+            continue
+        if not img.startswith("data:image/"):
+            continue
+        if len(img) > 700_000:
+            raise HTTPException(status_code=400, detail="حجم الصورة كبير جدًا")
+        clean.append(img)
+
+    await db.app_state.update_one(
+        {"key": "ads_slider"},
+        {"$set": {"key": "ads_slider", "images": clean, "updated_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True,
+    )
+    return {"ok": True, "count": len(clean)}
+
+
 # ---------- Avatar (per-user) ----------
 class AvatarIn(BaseModel):
     avatar: str = Field(min_length=20, max_length=350_000)  # base64 data URL
