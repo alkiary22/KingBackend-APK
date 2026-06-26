@@ -1496,6 +1496,13 @@ def calculate_challenge_score(prediction: dict, results: dict):
 
 @api_router.post("/challenge/prediction")
 async def save_challenge_prediction(data: ChallengePredictionIn, user=Depends(get_current_user)):
+    status_info = challenge_lock_status()
+    if status_info.get("locked"):
+        raise HTTPException(
+            status_code=403,
+            detail="تم إغلاق توقع التحدي مع بداية أول مباراة في دور الـ32"
+        )
+
     now = datetime.now(timezone.utc).isoformat()
 
     prediction = data.model_dump() if hasattr(data, "model_dump") else data.dict()
@@ -1687,6 +1694,48 @@ async def get_challenge_leaderboard(limit: int = 50):
     }
 
 # ===== End Challenge Predictions, Results, Scores API =====
+
+
+
+# ===== Challenge Lock API =====
+
+# وقت إغلاق توقع التحدي = بداية أول مباراة في دور الـ32
+# الافتراضي: الإثنين 29 يونيو 2026 الساعة 23:30 مكة = 20:30 UTC
+CHALLENGE_LOCK_AT = os.environ.get("CHALLENGE_LOCK_AT", "2026-06-29T20:30:00+00:00")
+
+
+def _parse_challenge_lock_at():
+    raw = CHALLENGE_LOCK_AT
+    try:
+        if raw.endswith("Z"):
+            raw = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        # في حال كان التاريخ غير صحيح لا نكسر التطبيق، ونغلق حسب التاريخ الافتراضي
+        return datetime(2026, 6, 29, 20, 30, tzinfo=timezone.utc)
+
+
+def challenge_lock_status():
+    lock_at = _parse_challenge_lock_at()
+    now = datetime.now(timezone.utc)
+    locked = now >= lock_at
+
+    return {
+        "locked": locked,
+        "lock_at": lock_at.isoformat(),
+        "server_time": now.isoformat(),
+        "message": "توقع التحدي مغلق" if locked else "توقع التحدي مفتوح",
+    }
+
+
+@api_router.get("/challenge/status")
+async def get_challenge_status():
+    return challenge_lock_status()
+
+# ===== End Challenge Lock API =====
 
 
 @app.on_event("startup")
@@ -2230,6 +2279,13 @@ def calculate_challenge_score(prediction: dict, results: dict):
 
 @api_router.post("/challenge/prediction")
 async def save_challenge_prediction(data: ChallengePredictionIn, user=Depends(get_current_user)):
+    status_info = challenge_lock_status()
+    if status_info.get("locked"):
+        raise HTTPException(
+            status_code=403,
+            detail="تم إغلاق توقع التحدي مع بداية أول مباراة في دور الـ32"
+        )
+
     now = datetime.now(timezone.utc).isoformat()
 
     prediction = data.model_dump() if hasattr(data, "model_dump") else data.dict()
@@ -2421,6 +2477,48 @@ async def get_challenge_leaderboard(limit: int = 50):
     }
 
 # ===== End Challenge Predictions, Results, Scores API =====
+
+
+
+# ===== Challenge Lock API =====
+
+# وقت إغلاق توقع التحدي = بداية أول مباراة في دور الـ32
+# الافتراضي: الإثنين 29 يونيو 2026 الساعة 23:30 مكة = 20:30 UTC
+CHALLENGE_LOCK_AT = os.environ.get("CHALLENGE_LOCK_AT", "2026-06-29T20:30:00+00:00")
+
+
+def _parse_challenge_lock_at():
+    raw = CHALLENGE_LOCK_AT
+    try:
+        if raw.endswith("Z"):
+            raw = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        # في حال كان التاريخ غير صحيح لا نكسر التطبيق، ونغلق حسب التاريخ الافتراضي
+        return datetime(2026, 6, 29, 20, 30, tzinfo=timezone.utc)
+
+
+def challenge_lock_status():
+    lock_at = _parse_challenge_lock_at()
+    now = datetime.now(timezone.utc)
+    locked = now >= lock_at
+
+    return {
+        "locked": locked,
+        "lock_at": lock_at.isoformat(),
+        "server_time": now.isoformat(),
+        "message": "توقع التحدي مغلق" if locked else "توقع التحدي مفتوح",
+    }
+
+
+@api_router.get("/challenge/status")
+async def get_challenge_status():
+    return challenge_lock_status()
+
+# ===== End Challenge Lock API =====
 
 
 @app.on_event("startup")
