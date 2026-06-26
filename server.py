@@ -1334,6 +1334,94 @@ async def seed_fixtures(_admin=Depends(require_admin)):
 
 
 # ---------- Startup ----------
+
+# ===== Challenge Bracket API =====
+
+DEFAULT_CHALLENGE_ROUND32 = [
+    {"id": "r32_1", "date": "الإثنين، 29 يونيو", "time": "23:30 مكة", "home": {"name": "كوت ديفوار", "flag": "🇨🇮"}, "away": {"name": "التشيك", "flag": "🇨🇿"}},
+    {"id": "r32_2", "date": "الأربعاء، 1 يوليو", "time": "00:00 مكة", "home": {"name": "فرنسا", "flag": "🇫🇷"}, "away": {"name": "الرأس الأخضر", "flag": "🇨🇻"}},
+    {"id": "r32_3", "date": "الأحد، 28 يونيو", "time": "22:00 مكة", "home": {"name": "كوريا الجنوبية", "flag": "🇰🇷"}, "away": {"name": "البوسنة", "flag": "🇧🇦"}},
+    {"id": "r32_4", "date": "الثلاثاء، 30 يونيو", "time": "04:00 مكة", "home": {"name": "هولندا", "flag": "🇳🇱"}, "away": {"name": "البرازيل", "flag": "🇧🇷"}},
+    {"id": "r32_5", "date": "الجمعة، 3 يوليو", "time": "02:00 مكة", "home": {"name": "أوزبكستان", "flag": "🇺🇿"}, "away": {"name": "كرواتيا", "flag": "🇭🇷"}},
+    {"id": "r32_6", "date": "الخميس، 2 يوليو", "time": "22:00 مكة", "home": {"name": "إسبانيا", "flag": "🇪🇸"}, "away": {"name": "النمسا", "flag": "🇦🇹"}},
+    {"id": "r32_7", "date": "الخميس، 2 يوليو", "time": "03:00 مكة", "home": {"name": "أستراليا", "flag": "🇦🇺"}, "away": {"name": "كندا", "flag": "🇨🇦"}},
+    {"id": "r32_8", "date": "الأربعاء، 1 يوليو", "time": "23:00 مكة", "home": {"name": "المغرب", "flag": "🇲🇦"}, "away": {"name": "أمريكا", "flag": "🇺🇸"}},
+    {"id": "r32_9", "date": "السبت، 4 يوليو", "time": "21:00 مكة", "home": {"name": "الأرجنتين", "flag": "🇦🇷"}, "away": {"name": "اليابان", "flag": "🇯🇵"}},
+    {"id": "r32_10", "date": "الأحد، 5 يوليو", "time": "00:00 مكة", "home": {"name": "إنجلترا", "flag": "🏴"}, "away": {"name": "السنغال", "flag": "🇸🇳"}},
+    {"id": "r32_11", "date": "الإثنين، 6 يوليو", "time": "22:00 مكة", "home": {"name": "ألمانيا", "flag": "🇩🇪"}, "away": {"name": "غانا", "flag": "🇬🇭"}},
+    {"id": "r32_12", "date": "الثلاثاء، 7 يوليو", "time": "03:00 مكة", "home": {"name": "إيطاليا", "flag": "🇮🇹"}, "away": {"name": "مصر", "flag": "🇪🇬"}},
+    {"id": "r32_13", "date": "الأربعاء، 8 يوليو", "time": "22:00 مكة", "home": {"name": "البرتغال", "flag": "🇵🇹"}, "away": {"name": "المكسيك", "flag": "🇲🇽"}},
+    {"id": "r32_14", "date": "الخميس، 9 يوليو", "time": "23:00 مكة", "home": {"name": "أوروجواي", "flag": "🇺🇾"}, "away": {"name": "السعودية", "flag": "🇸🇦"}},
+    {"id": "r32_15", "date": "الجمعة، 10 يوليو", "time": "22:00 مكة", "home": {"name": "بلجيكا", "flag": "🇧🇪"}, "away": {"name": "كولومبيا", "flag": "🇨🇴"}},
+    {"id": "r32_16", "date": "السبت، 11 يوليو", "time": "00:00 مكة", "home": {"name": "سويسرا", "flag": "🇨🇭"}, "away": {"name": "الدنمارك", "flag": "🇩🇰"}},
+]
+
+
+class ChallengeTeamIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    flag: str = Field(min_length=1, max_length=12)
+
+
+class ChallengeMatchIn(BaseModel):
+    id: str
+    date: str = Field(min_length=1, max_length=80)
+    time: str = Field(min_length=1, max_length=80)
+    home: ChallengeTeamIn
+    away: ChallengeTeamIn
+
+
+class ChallengeBracketIn(BaseModel):
+    matches: List[ChallengeMatchIn]
+
+
+@api_router.get("/challenge/bracket")
+async def get_challenge_bracket():
+    doc = await db.challenge_brackets.find_one(
+        {"id": "worldcup2026_round32"},
+        {"_id": 0}
+    )
+
+    if not doc:
+        return {
+            "id": "worldcup2026_round32",
+            "matches": DEFAULT_CHALLENGE_ROUND32,
+            "updated_at": None,
+        }
+
+    return doc
+
+
+@api_router.put("/admin/challenge/bracket")
+async def update_challenge_bracket(data: ChallengeBracketIn, _staff=Depends(require_staff)):
+    if len(data.matches) != 16:
+        raise HTTPException(status_code=400, detail="يجب أن يكون عدد مباريات دور الـ32 هو 16 مباراة")
+
+    matches = []
+    for m in data.matches:
+        if hasattr(m, "model_dump"):
+            matches.append(m.model_dump())
+        else:
+            matches.append(m.dict())
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    doc = {
+        "id": "worldcup2026_round32",
+        "matches": matches,
+        "updated_at": now,
+    }
+
+    await db.challenge_brackets.update_one(
+        {"id": "worldcup2026_round32"},
+        {"$set": doc},
+        upsert=True
+    )
+
+    return {"success": True, "updated_at": now, "matches": matches}
+
+# ===== End Challenge Bracket API =====
+
+
 @app.on_event("startup")
 async def on_startup():
     # Indexes for faster login, matches, predictions, leaderboard, notifications and chat
@@ -1711,6 +1799,94 @@ async def fix_match_time(data: MatchTimeByTeamsIn, _staff=Depends(require_staff)
         "match_id": match["id"],
         "kickoff": data.kickoff
     }
+
+
+
+# ===== Challenge Bracket API =====
+
+DEFAULT_CHALLENGE_ROUND32 = [
+    {"id": "r32_1", "date": "الإثنين، 29 يونيو", "time": "23:30 مكة", "home": {"name": "كوت ديفوار", "flag": "🇨🇮"}, "away": {"name": "التشيك", "flag": "🇨🇿"}},
+    {"id": "r32_2", "date": "الأربعاء، 1 يوليو", "time": "00:00 مكة", "home": {"name": "فرنسا", "flag": "🇫🇷"}, "away": {"name": "الرأس الأخضر", "flag": "🇨🇻"}},
+    {"id": "r32_3", "date": "الأحد، 28 يونيو", "time": "22:00 مكة", "home": {"name": "كوريا الجنوبية", "flag": "🇰🇷"}, "away": {"name": "البوسنة", "flag": "🇧🇦"}},
+    {"id": "r32_4", "date": "الثلاثاء، 30 يونيو", "time": "04:00 مكة", "home": {"name": "هولندا", "flag": "🇳🇱"}, "away": {"name": "البرازيل", "flag": "🇧🇷"}},
+    {"id": "r32_5", "date": "الجمعة، 3 يوليو", "time": "02:00 مكة", "home": {"name": "أوزبكستان", "flag": "🇺🇿"}, "away": {"name": "كرواتيا", "flag": "🇭🇷"}},
+    {"id": "r32_6", "date": "الخميس، 2 يوليو", "time": "22:00 مكة", "home": {"name": "إسبانيا", "flag": "🇪🇸"}, "away": {"name": "النمسا", "flag": "🇦🇹"}},
+    {"id": "r32_7", "date": "الخميس، 2 يوليو", "time": "03:00 مكة", "home": {"name": "أستراليا", "flag": "🇦🇺"}, "away": {"name": "كندا", "flag": "🇨🇦"}},
+    {"id": "r32_8", "date": "الأربعاء، 1 يوليو", "time": "23:00 مكة", "home": {"name": "المغرب", "flag": "🇲🇦"}, "away": {"name": "أمريكا", "flag": "🇺🇸"}},
+    {"id": "r32_9", "date": "السبت، 4 يوليو", "time": "21:00 مكة", "home": {"name": "الأرجنتين", "flag": "🇦🇷"}, "away": {"name": "اليابان", "flag": "🇯🇵"}},
+    {"id": "r32_10", "date": "الأحد، 5 يوليو", "time": "00:00 مكة", "home": {"name": "إنجلترا", "flag": "🏴"}, "away": {"name": "السنغال", "flag": "🇸🇳"}},
+    {"id": "r32_11", "date": "الإثنين، 6 يوليو", "time": "22:00 مكة", "home": {"name": "ألمانيا", "flag": "🇩🇪"}, "away": {"name": "غانا", "flag": "🇬🇭"}},
+    {"id": "r32_12", "date": "الثلاثاء، 7 يوليو", "time": "03:00 مكة", "home": {"name": "إيطاليا", "flag": "🇮🇹"}, "away": {"name": "مصر", "flag": "🇪🇬"}},
+    {"id": "r32_13", "date": "الأربعاء، 8 يوليو", "time": "22:00 مكة", "home": {"name": "البرتغال", "flag": "🇵🇹"}, "away": {"name": "المكسيك", "flag": "🇲🇽"}},
+    {"id": "r32_14", "date": "الخميس، 9 يوليو", "time": "23:00 مكة", "home": {"name": "أوروجواي", "flag": "🇺🇾"}, "away": {"name": "السعودية", "flag": "🇸🇦"}},
+    {"id": "r32_15", "date": "الجمعة، 10 يوليو", "time": "22:00 مكة", "home": {"name": "بلجيكا", "flag": "🇧🇪"}, "away": {"name": "كولومبيا", "flag": "🇨🇴"}},
+    {"id": "r32_16", "date": "السبت، 11 يوليو", "time": "00:00 مكة", "home": {"name": "سويسرا", "flag": "🇨🇭"}, "away": {"name": "الدنمارك", "flag": "🇩🇰"}},
+]
+
+
+class ChallengeTeamIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    flag: str = Field(min_length=1, max_length=12)
+
+
+class ChallengeMatchIn(BaseModel):
+    id: str
+    date: str = Field(min_length=1, max_length=80)
+    time: str = Field(min_length=1, max_length=80)
+    home: ChallengeTeamIn
+    away: ChallengeTeamIn
+
+
+class ChallengeBracketIn(BaseModel):
+    matches: List[ChallengeMatchIn]
+
+
+@api_router.get("/challenge/bracket")
+async def get_challenge_bracket():
+    doc = await db.challenge_brackets.find_one(
+        {"id": "worldcup2026_round32"},
+        {"_id": 0}
+    )
+
+    if not doc:
+        return {
+            "id": "worldcup2026_round32",
+            "matches": DEFAULT_CHALLENGE_ROUND32,
+            "updated_at": None,
+        }
+
+    return doc
+
+
+@api_router.put("/admin/challenge/bracket")
+async def update_challenge_bracket(data: ChallengeBracketIn, _staff=Depends(require_staff)):
+    if len(data.matches) != 16:
+        raise HTTPException(status_code=400, detail="يجب أن يكون عدد مباريات دور الـ32 هو 16 مباراة")
+
+    matches = []
+    for m in data.matches:
+        if hasattr(m, "model_dump"):
+            matches.append(m.model_dump())
+        else:
+            matches.append(m.dict())
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    doc = {
+        "id": "worldcup2026_round32",
+        "matches": matches,
+        "updated_at": now,
+    }
+
+    await db.challenge_brackets.update_one(
+        {"id": "worldcup2026_round32"},
+        {"$set": doc},
+        upsert=True
+    )
+
+    return {"success": True, "updated_at": now, "matches": matches}
+
+# ===== End Challenge Bracket API =====
 
 
 @app.on_event("startup")
