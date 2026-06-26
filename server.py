@@ -1422,6 +1422,273 @@ async def update_challenge_bracket(data: ChallengeBracketIn, _staff=Depends(requ
 # ===== End Challenge Bracket API =====
 
 
+
+# ===== Challenge Predictions, Results, Scores API =====
+
+CHALLENGE_ID = "worldcup2026_round32"
+
+CHALLENGE_POINTS = {
+    "round32": 2,
+    "round16": 4,
+    "quarterFinals": 6,
+    "semiFinals": 8,
+    "champion": 15,
+}
+
+
+class ChallengePredictionIn(BaseModel):
+    round32: dict = Field(default_factory=dict)
+    round16: dict = Field(default_factory=dict)
+    quarterFinals: dict = Field(default_factory=dict)
+    semiFinals: dict = Field(default_factory=dict)
+    final: dict = Field(default_factory=dict)
+    champion: dict
+
+
+class ChallengeResultsIn(BaseModel):
+    round32: dict = Field(default_factory=dict)
+    round16: dict = Field(default_factory=dict)
+    quarterFinals: dict = Field(default_factory=dict)
+    semiFinals: dict = Field(default_factory=dict)
+    final: dict = Field(default_factory=dict)
+    champion: dict
+
+
+def _team_name(value):
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value.get("name")
+    return str(value)
+
+
+def _same_team(a, b):
+    return bool(_team_name(a)) and _team_name(a) == _team_name(b)
+
+
+def calculate_challenge_score(prediction: dict, results: dict):
+    score = 0
+    details = {
+        "round32": 0,
+        "round16": 0,
+        "quarterFinals": 0,
+        "semiFinals": 0,
+        "champion": 0,
+    }
+
+    for round_key in ["round32", "round16", "quarterFinals", "semiFinals"]:
+        pred_round = prediction.get(round_key, {}) or {}
+        real_round = results.get(round_key, {}) or {}
+        points = CHALLENGE_POINTS[round_key]
+
+        for match_id, predicted_team in pred_round.items():
+            real_team = real_round.get(match_id)
+            if _same_team(predicted_team, real_team):
+                score += points
+                details[round_key] += points
+
+    if _same_team(prediction.get("champion"), results.get("champion")):
+        score += CHALLENGE_POINTS["champion"]
+        details["champion"] += CHALLENGE_POINTS["champion"]
+
+    return score, details
+
+
+@api_router.post("/challenge/prediction")
+async def save_challenge_prediction(data: ChallengePredictionIn, user=Depends(get_current_user)):
+    now = datetime.now(timezone.utc).isoformat()
+
+    prediction = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+
+    doc = {
+        "challenge_id": CHALLENGE_ID,
+        "user_id": user["id"],
+        "user_name": user.get("name"),
+        "prediction": prediction,
+        "updated_at": now,
+    }
+
+    await db.challenge_predictions.update_one(
+        {
+            "challenge_id": CHALLENGE_ID,
+            "user_id": user["id"],
+        },
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+    return {
+        "success": True,
+        "message": "تم حفظ توقع التحدي",
+        "prediction": prediction,
+        "updated_at": now,
+    }
+
+
+@api_router.get("/challenge/my-prediction")
+async def get_my_challenge_prediction(user=Depends(get_current_user)):
+    doc = await db.challenge_predictions.find_one(
+        {
+            "challenge_id": CHALLENGE_ID,
+            "user_id": user["id"],
+        },
+        {"_id": 0},
+    )
+
+    return {
+        "prediction": doc.get("prediction") if doc else None,
+        "updated_at": doc.get("updated_at") if doc else None,
+    }
+
+
+@api_router.put("/admin/challenge/results")
+async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(require_staff)):
+    now = datetime.now(timezone.utc).isoformat()
+
+    results = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+
+    doc = {
+        "challenge_id": CHALLENGE_ID,
+        "results": results,
+        "updated_at": now,
+    }
+
+    await db.challenge_results.update_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+    return {
+        "success": True,
+        "message": "تم حفظ نتائج التحدي",
+        "results": results,
+        "updated_at": now,
+    }
+
+
+@api_router.get("/challenge/results")
+async def get_challenge_results():
+    doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    return {
+        "results": doc.get("results") if doc else None,
+        "updated_at": doc.get("updated_at") if doc else None,
+    }
+
+
+@api_router.get("/challenge/my-score")
+async def get_my_challenge_score(user=Depends(get_current_user)):
+    pred_doc = await db.challenge_predictions.find_one(
+        {
+            "challenge_id": CHALLENGE_ID,
+            "user_id": user["id"],
+        },
+        {"_id": 0},
+    )
+
+    results_doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    if not pred_doc:
+        return {
+            "score": 0,
+            "details": None,
+            "has_prediction": False,
+            "has_results": bool(results_doc),
+        }
+
+    if not results_doc:
+        return {
+            "score": 0,
+            "details": None,
+            "has_prediction": True,
+            "has_results": False,
+        }
+
+    score, details = calculate_challenge_score(
+        pred_doc.get("prediction", {}),
+        results_doc.get("results", {}),
+    )
+
+    return {
+        "score": score,
+        "details": details,
+        "has_prediction": True,
+        "has_results": True,
+    }
+
+
+@api_router.get("/challenge/leaderboard")
+async def get_challenge_leaderboard(limit: int = 50):
+    results_doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    predictions = await db.challenge_predictions.find(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    ).to_list(10000)
+
+    user_ids = [p.get("user_id") for p in predictions if p.get("user_id")]
+    users_map = {}
+
+    if user_ids:
+        users = await db.users.find(
+            {"id": {"$in": user_ids}},
+            {"_id": 0, "id": 1, "name": 1, "avatar": 1, "role": 1},
+        ).to_list(10000)
+
+        users_map = {u["id"]: u for u in users}
+
+    rows = []
+
+    for pred in predictions:
+        user_id = pred.get("user_id")
+        user_doc = users_map.get(user_id, {})
+
+        score = 0
+        details = None
+
+        if results_doc:
+            score, details = calculate_challenge_score(
+                pred.get("prediction", {}),
+                results_doc.get("results", {}),
+            )
+
+        champion = (pred.get("prediction") or {}).get("champion") or {}
+
+        rows.append({
+            "user_id": user_id,
+            "name": user_doc.get("name") or pred.get("user_name") or "مستخدم",
+            "avatar": user_doc.get("avatar"),
+            "role": user_doc.get("role", "user"),
+            "score": score,
+            "details": details,
+            "champion": champion,
+            "updated_at": pred.get("updated_at"),
+        })
+
+    rows.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    for i, row in enumerate(rows, start=1):
+        row["rank"] = i
+
+    return {
+        "has_results": bool(results_doc),
+        "count": len(rows),
+        "items": rows[:max(1, min(limit, 100))],
+    }
+
+# ===== End Challenge Predictions, Results, Scores API =====
+
+
 @app.on_event("startup")
 async def on_startup():
     # Indexes for faster login, matches, predictions, leaderboard, notifications and chat
@@ -1887,6 +2154,273 @@ async def update_challenge_bracket(data: ChallengeBracketIn, _staff=Depends(requ
     return {"success": True, "updated_at": now, "matches": matches}
 
 # ===== End Challenge Bracket API =====
+
+
+
+# ===== Challenge Predictions, Results, Scores API =====
+
+CHALLENGE_ID = "worldcup2026_round32"
+
+CHALLENGE_POINTS = {
+    "round32": 2,
+    "round16": 4,
+    "quarterFinals": 6,
+    "semiFinals": 8,
+    "champion": 15,
+}
+
+
+class ChallengePredictionIn(BaseModel):
+    round32: dict = Field(default_factory=dict)
+    round16: dict = Field(default_factory=dict)
+    quarterFinals: dict = Field(default_factory=dict)
+    semiFinals: dict = Field(default_factory=dict)
+    final: dict = Field(default_factory=dict)
+    champion: dict
+
+
+class ChallengeResultsIn(BaseModel):
+    round32: dict = Field(default_factory=dict)
+    round16: dict = Field(default_factory=dict)
+    quarterFinals: dict = Field(default_factory=dict)
+    semiFinals: dict = Field(default_factory=dict)
+    final: dict = Field(default_factory=dict)
+    champion: dict
+
+
+def _team_name(value):
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value.get("name")
+    return str(value)
+
+
+def _same_team(a, b):
+    return bool(_team_name(a)) and _team_name(a) == _team_name(b)
+
+
+def calculate_challenge_score(prediction: dict, results: dict):
+    score = 0
+    details = {
+        "round32": 0,
+        "round16": 0,
+        "quarterFinals": 0,
+        "semiFinals": 0,
+        "champion": 0,
+    }
+
+    for round_key in ["round32", "round16", "quarterFinals", "semiFinals"]:
+        pred_round = prediction.get(round_key, {}) or {}
+        real_round = results.get(round_key, {}) or {}
+        points = CHALLENGE_POINTS[round_key]
+
+        for match_id, predicted_team in pred_round.items():
+            real_team = real_round.get(match_id)
+            if _same_team(predicted_team, real_team):
+                score += points
+                details[round_key] += points
+
+    if _same_team(prediction.get("champion"), results.get("champion")):
+        score += CHALLENGE_POINTS["champion"]
+        details["champion"] += CHALLENGE_POINTS["champion"]
+
+    return score, details
+
+
+@api_router.post("/challenge/prediction")
+async def save_challenge_prediction(data: ChallengePredictionIn, user=Depends(get_current_user)):
+    now = datetime.now(timezone.utc).isoformat()
+
+    prediction = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+
+    doc = {
+        "challenge_id": CHALLENGE_ID,
+        "user_id": user["id"],
+        "user_name": user.get("name"),
+        "prediction": prediction,
+        "updated_at": now,
+    }
+
+    await db.challenge_predictions.update_one(
+        {
+            "challenge_id": CHALLENGE_ID,
+            "user_id": user["id"],
+        },
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+    return {
+        "success": True,
+        "message": "تم حفظ توقع التحدي",
+        "prediction": prediction,
+        "updated_at": now,
+    }
+
+
+@api_router.get("/challenge/my-prediction")
+async def get_my_challenge_prediction(user=Depends(get_current_user)):
+    doc = await db.challenge_predictions.find_one(
+        {
+            "challenge_id": CHALLENGE_ID,
+            "user_id": user["id"],
+        },
+        {"_id": 0},
+    )
+
+    return {
+        "prediction": doc.get("prediction") if doc else None,
+        "updated_at": doc.get("updated_at") if doc else None,
+    }
+
+
+@api_router.put("/admin/challenge/results")
+async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(require_staff)):
+    now = datetime.now(timezone.utc).isoformat()
+
+    results = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+
+    doc = {
+        "challenge_id": CHALLENGE_ID,
+        "results": results,
+        "updated_at": now,
+    }
+
+    await db.challenge_results.update_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+    return {
+        "success": True,
+        "message": "تم حفظ نتائج التحدي",
+        "results": results,
+        "updated_at": now,
+    }
+
+
+@api_router.get("/challenge/results")
+async def get_challenge_results():
+    doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    return {
+        "results": doc.get("results") if doc else None,
+        "updated_at": doc.get("updated_at") if doc else None,
+    }
+
+
+@api_router.get("/challenge/my-score")
+async def get_my_challenge_score(user=Depends(get_current_user)):
+    pred_doc = await db.challenge_predictions.find_one(
+        {
+            "challenge_id": CHALLENGE_ID,
+            "user_id": user["id"],
+        },
+        {"_id": 0},
+    )
+
+    results_doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    if not pred_doc:
+        return {
+            "score": 0,
+            "details": None,
+            "has_prediction": False,
+            "has_results": bool(results_doc),
+        }
+
+    if not results_doc:
+        return {
+            "score": 0,
+            "details": None,
+            "has_prediction": True,
+            "has_results": False,
+        }
+
+    score, details = calculate_challenge_score(
+        pred_doc.get("prediction", {}),
+        results_doc.get("results", {}),
+    )
+
+    return {
+        "score": score,
+        "details": details,
+        "has_prediction": True,
+        "has_results": True,
+    }
+
+
+@api_router.get("/challenge/leaderboard")
+async def get_challenge_leaderboard(limit: int = 50):
+    results_doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    predictions = await db.challenge_predictions.find(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    ).to_list(10000)
+
+    user_ids = [p.get("user_id") for p in predictions if p.get("user_id")]
+    users_map = {}
+
+    if user_ids:
+        users = await db.users.find(
+            {"id": {"$in": user_ids}},
+            {"_id": 0, "id": 1, "name": 1, "avatar": 1, "role": 1},
+        ).to_list(10000)
+
+        users_map = {u["id"]: u for u in users}
+
+    rows = []
+
+    for pred in predictions:
+        user_id = pred.get("user_id")
+        user_doc = users_map.get(user_id, {})
+
+        score = 0
+        details = None
+
+        if results_doc:
+            score, details = calculate_challenge_score(
+                pred.get("prediction", {}),
+                results_doc.get("results", {}),
+            )
+
+        champion = (pred.get("prediction") or {}).get("champion") or {}
+
+        rows.append({
+            "user_id": user_id,
+            "name": user_doc.get("name") or pred.get("user_name") or "مستخدم",
+            "avatar": user_doc.get("avatar"),
+            "role": user_doc.get("role", "user"),
+            "score": score,
+            "details": details,
+            "champion": champion,
+            "updated_at": pred.get("updated_at"),
+        })
+
+    rows.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    for i, row in enumerate(rows, start=1):
+        row["rank"] = i
+
+    return {
+        "has_results": bool(results_doc),
+        "count": len(rows),
+        "items": rows[:max(1, min(limit, 100))],
+    }
+
+# ===== End Challenge Predictions, Results, Scores API =====
 
 
 @app.on_event("startup")
