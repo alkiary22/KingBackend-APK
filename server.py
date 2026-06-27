@@ -1574,13 +1574,6 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
     }
 
 
-@api_router.post("/admin/challenge/results/reset")
-async def reset_challenge_results(_staff=Depends(require_staff)):
-    await db.challenge_results.delete_one({"challenge_id": CHALLENGE_ID})
-    return {"success": True, "message": "تم تصفير نتائج التحدي بنجاح"}
-
-
-
 @api_router.get("/challenge/results")
 async def get_challenge_results():
     doc = await db.challenge_results.find_one(
@@ -1945,21 +1938,17 @@ async def external_live_matches():
 async def import_new_fixtures(_admin=Depends(require_admin)):
     """
     يستورد مباريات كأس العالم الجديدة فقط من TheSportsDB
-    ويضيف معها مباريات دور الـ32 المحددة للتحدي بالترتيب والمواعيد الصحيحة المأخوذة من الصورة،
     بدون حذف أي مباراة أو توقع أو نقاط.
     """
     try:
         events = await fetch_world_cup_events()
     except Exception as e:
-        print(f"فشل جلب المباريات من المصدر الخارجي: {e}")
-        events = []
+        raise HTTPException(status_code=500, detail=f"فشل جلب المباريات: {e}")
 
     created = 0
     skipped = 0
     now_iso = datetime.now(timezone.utc).isoformat()
-    MECCA = timezone(timedelta(hours=3))
 
-    # 1. معالجة مباريات دور المجموعات من Events
     for ev in events:
         h_code = normalize_team_code(ev.get("strHomeTeam"))
         a_code = normalize_team_code(ev.get("strAwayTeam"))
@@ -1993,7 +1982,7 @@ async def import_new_fixtures(_admin=Depends(require_admin)):
         except Exception:
             kickoff = datetime.now(timezone.utc)
 
-        stage = ev.get("strRound") or ev.get("strStage") or "مرحلة المجموعات"
+        stage = ev.get("strRound") or ev.get("strStage") or "كأس العالم"
 
         doc = {
             "id": str(uuid.uuid4()),
@@ -2015,70 +2004,13 @@ async def import_new_fixtures(_admin=Depends(require_admin)):
         await db.matches.insert_one(doc)
         created += 1
 
-    # 2. معالجة مباريات دور الـ 32 (تطابق 100% مع الصورة وبالترتيب الزمني)
-    EXACT_R32_FIXTURES = [
-        ("جنوب أفريقيا", "كندا", "2026-06-28", "22:00"),
-        ("البرازيل", "اليابان", "2026-06-29", "20:00"),
-        ("ألمانيا", "باراغواي", "2026-06-29", "23:30"),
-        ("هولندا", "المغرب", "2026-06-30", "04:00"),
-        ("ساحل العاج", "النرويج", "2026-06-30", "20:00"),
-        ("فرنسا", "السويد", "2026-07-01", "00:00"),
-        ("المكسيك", "يُحدّد لاحقاً", "2026-07-01", "04:00"),
-        ("يُحدّد لاحقاً", "يُحدّد لاحقاً", "2026-07-01", "19:00"),
-        ("بلجيكا", "يُحدّد لاحقاً", "2026-07-01", "23:00"),
-        ("الولايات المتحدة", "البوسنة والهرسك", "2026-07-02", "03:00"),
-        ("إسبانيا", "يُحدّد لاحقاً", "2026-07-02", "22:00"),
-        ("يُحدّد لاحقاً", "يُحدّد لاحقاً", "2026-07-03", "02:00"),
-        ("سويسرا", "يُحدّد لاحقاً", "2026-07-03", "06:00"),
-        ("أستراليا", "مصر", "2026-07-03", "21:00"),
-        ("الأرجنتين", "الرأس الأخضر", "2026-07-04", "01:00"),
-        ("يُحدّد لاحقاً", "يُحدّد لاحقاً", "2026-07-04", "04:30")
-    ]
-
-    for home, away, date_local, time_local in EXACT_R32_FIXTURES:
-        existing = await db.matches.find_one({
-            "$or": [
-                {"home_team": home, "away_team": away},
-                {"home_team": away, "away_team": home}
-            ]
-        })
-
-        if existing:
-            skipped += 1
-            continue
-
-        h, mnt = map(int, time_local.split(":"))
-        y, m, d = map(int, date_local.split("-"))
-        mecca_dt = datetime(y, m, d, h, mnt, tzinfo=MECCA)
-        kickoff_utc = mecca_dt.astimezone(timezone.utc)
-        match_date_mecca = mecca_dt.strftime("%Y-%m-%d")
-
-        doc = {
-            "id": str(uuid.uuid4()),
-            "home_team": home,
-            "away_team": away,
-            "match_date": match_date_mecca,
-            "kickoff_utc": kickoff_utc.isoformat().replace("+00:00", "Z"),
-            "stage": "دور الـ32",
-            "group_name": None,
-            "status": "scheduled",
-            "home_score": None,
-            "away_score": None,
-            "result_source": None,
-            "result_updated_at": None,
-            "created_at": now_iso,
-            "updated_at": now_iso,
-        }
-
-        await db.matches.insert_one(doc)
-        created += 1
-
     return {
         "success": True,
         "created": created,
         "skipped": skipped,
-        "message": f"تم بنجاح استيراد {created} مباراة جديدة وتحديث جدول كأس العالم وتحدي دور الـ32!"
+        "message": "تم استيراد مباريات كأس العالم الجديدة بدون حذف التوقعات"
     }
+
 
 
 class ChatMessageIn(BaseModel):
@@ -2423,13 +2355,6 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
         "results": results,
         "updated_at": now,
     }
-
-
-@api_router.post("/admin/challenge/results/reset")
-async def reset_challenge_results(_staff=Depends(require_staff)):
-    await db.challenge_results.delete_one({"challenge_id": CHALLENGE_ID})
-    return {"success": True, "message": "تم تصفير نتائج التحدي بنجاح"}
-
 
 
 @api_router.get("/challenge/results")
