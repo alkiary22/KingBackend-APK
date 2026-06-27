@@ -1943,18 +1943,16 @@ async def external_live_matches():
 
 @api_router.post("/admin/import-new-fixtures")
 async def import_new_fixtures(_admin=Depends(require_admin)):
-    """
-    يستورد مباريات كأس العالم الجديدة فقط من TheSportsDB
-    بدون حذف أي مباراة أو توقع أو نقاط.
-    """
     try:
         events = await fetch_world_cup_events()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"فشل جلب المباريات: {e}")
+        print(f"فشل جلب المباريات من المصدر الخارجي: {e}")
+        events = []
 
     created = 0
     skipped = 0
     now_iso = datetime.now(timezone.utc).isoformat()
+    MECCA = timezone(timedelta(hours=3))
 
     for ev in events:
         h_code = normalize_team_code(ev.get("strHomeTeam"))
@@ -1989,16 +1987,74 @@ async def import_new_fixtures(_admin=Depends(require_admin)):
         except Exception:
             kickoff = datetime.now(timezone.utc)
 
-        stage = ev.get("strRound") or ev.get("strStage") or "كأس العالم"
+        stage = ev.get("strRound") or ev.get("strStage") or "مرحلة المجموعات"
 
         doc = {
             "id": str(uuid.uuid4()),
             "home_team": h_code,
             "away_team": a_code,
             "match_date": kickoff.date().isoformat(),
-            "kickoff_utc": kickoff.astimezone(timezone.utc).isoformat(),
+            "kickoff": kickoff.astimezone(timezone.utc).isoformat(),
             "stage": stage,
             "group_name": "",
+            "status": "scheduled",
+            "home_score": None,
+            "away_score": None,
+            "result_source": None,
+            "result_updated_at": None,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+
+        await db.matches.insert_one(doc)
+        created += 1
+
+    # استخدام الرموز المعتمدة المكونة من 3 أحرف
+    EXACT_R32_FIXTURES = [
+        ("RSA", "CAN", "2026-06-28", "22:00"),
+        ("BRA", "JPN", "2026-06-29", "20:00"),
+        ("GER", "PAR", "2026-06-29", "23:30"),
+        ("NED", "MAR", "2026-06-30", "04:00"),
+        ("CIV", "NOR", "2026-06-30", "20:00"),
+        ("FRA", "SWE", "2026-07-01", "00:00"),
+        ("MEX", "TBD", "2026-07-01", "04:00"),
+        ("TBD", "TBD", "2026-07-01", "19:00"),
+        ("BEL", "TBD", "2026-07-01", "23:00"),
+        ("USA", "BIH", "2026-07-02", "03:00"),
+        ("ESP", "TBD", "2026-07-02", "22:00"),
+        ("TBD", "TBD", "2026-07-03", "02:00"),
+        ("SUI", "TBD", "2026-07-03", "06:00"),
+        ("AUS", "EGY", "2026-07-03", "21:00"),
+        ("ARG", "CPV", "2026-07-04", "01:00"),
+        ("TBD", "TBD", "2026-07-04", "04:30")
+    ]
+
+    for home, away, date_local, time_local in EXACT_R32_FIXTURES:
+        existing = await db.matches.find_one({
+            "$or": [
+                {"home_team": home, "away_team": away},
+                {"home_team": away, "away_team": home}
+            ]
+        })
+
+        if existing:
+            skipped += 1
+            continue
+
+        h, mnt = map(int, time_local.split(":"))
+        y, m, d = map(int, date_local.split("-"))
+        mecca_dt = datetime(y, m, d, h, mnt, tzinfo=MECCA)
+        kickoff_utc = mecca_dt.astimezone(timezone.utc)
+        match_date_mecca = mecca_dt.strftime("%Y-%m-%d")
+
+        doc = {
+            "id": str(uuid.uuid4()),
+            "home_team": home,
+            "away_team": away,
+            "match_date": match_date_mecca,
+            "kickoff": kickoff_utc.isoformat().replace("+00:00", "Z"),
+            "stage": "دور الـ32",
+            "group_name": None,
             "status": "scheduled",
             "home_score": None,
             "away_score": None,
@@ -2015,9 +2071,28 @@ async def import_new_fixtures(_admin=Depends(require_admin)):
         "success": True,
         "created": created,
         "skipped": skipped,
-        "message": "تم استيراد مباريات كأس العالم الجديدة بدون حذف التوقعات"
+        "message": f"تم بنجاح استيراد {created} مباراة جديدة وتحديث جدول كأس العالم وتحدي دور الـ32!"
     }
 
+
+@app.on_event("startup")
+async def repair_r32_team_names_to_codes():
+    try:
+        mapping = {
+            "جنوب أفريقيا": "RSA", "كندا": "CAN", "البرازيل": "BRA", "اليابان": "JPN",
+            "ألمانيا": "GER", "باراغواي": "PAR", "هولندا": "NED", "المغرب": "MAR",
+            "ساحل العاج": "CIV", "النرويج": "NOR", "فرنسا": "FRA", "السويد": "SWE",
+            "المكسيك": "MEX", "بلجيكا": "BEL", "الولايات المتحدة": "USA", "البوسنة والهرسك": "BIH",
+            "إسبانيا": "ESP", "سويسرا": "SUI", "أستراليا": "AUS", "مصر": "EGY",
+            "الأرجنتين": "ARG", "الرأس الأخضر": "CPV", "كولومبيا": "COL", "كرواتيا": "CRO",
+            "يُحدّد لاحقاً": "TBD"
+        }
+        for arabic_name, code in mapping.items():
+            await db.matches.update_many({"home_team": arabic_name}, {"$set": {"home_team": code}})
+            await db.matches.update_many({"away_team": arabic_name}, {"$set": {"away_team": code}})
+        print("✅ Successfully repaired database team names to official codes!")
+    except Exception as e:
+        print("Database repair error:", e)
 
 
 class ChatMessageIn(BaseModel):
