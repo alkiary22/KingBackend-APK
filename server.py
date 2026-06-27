@@ -2553,3 +2553,16 @@ app.add_middleware(
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+@app.on_event("startup")
+async def fix_corrupted_fields():
+    try:
+        # تحويل اسم الحقل من kickoff_utc إلى kickoff لجميع المباريات التالفة
+        result = await db.matches.update_many(
+            {"kickoff": {"$exists": False}, "kickoff_utc": {"$exists": True}},
+            [{"$set": {"kickoff": "$kickoff_utc"}}]
+        )
+        print(f"✅ تم إصلاح وتصحيح مواعيد {result.modified_count} مباراة في قاعدة البيانات!")
+    except Exception as e:
+        print("خطأ أثناء إصلاح قاعدة البيانات:", e)
