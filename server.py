@@ -1574,6 +1574,13 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
     }
 
 
+@api_router.post("/admin/challenge/results/reset")
+async def reset_challenge_results(_staff=Depends(require_staff)):
+    await db.challenge_results.delete_one({"challenge_id": CHALLENGE_ID})
+    return {"success": True, "message": "تم تصفير نتائج التحدي بنجاح"}
+
+
+
 @api_router.get("/challenge/results")
 async def get_challenge_results():
     doc = await db.challenge_results.find_one(
@@ -2355,6 +2362,13 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
         "results": results,
         "updated_at": now,
     }
+
+
+@api_router.post("/admin/challenge/results/reset")
+async def reset_challenge_results(_staff=Depends(require_staff)):
+    await db.challenge_results.delete_one({"challenge_id": CHALLENGE_ID})
+    return {"success": True, "message": "تم تصفير نتائج التحدي بنجاح"}
+
 
 
 @api_router.get("/challenge/results")
