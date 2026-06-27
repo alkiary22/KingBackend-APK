@@ -1428,11 +1428,11 @@ async def update_challenge_bracket(data: ChallengeBracketIn, _staff=Depends(requ
 CHALLENGE_ID = "worldcup2026_round32"
 
 CHALLENGE_POINTS = {
-    "round32": 2,
-    "round16": 4,
-    "quarterFinals": 6,
-    "semiFinals": 8,
-    "champion": 15,
+    "round32": 1,
+    "round16": 2,
+    "quarterFinals": 3,
+    "semiFinals": 4,
+    "champion": 10,
 }
 
 
@@ -2293,11 +2293,11 @@ async def update_challenge_bracket(data: ChallengeBracketIn, _staff=Depends(requ
 CHALLENGE_ID = "worldcup2026_round32"
 
 CHALLENGE_POINTS = {
-    "round32": 2,
-    "round16": 4,
-    "quarterFinals": 6,
-    "semiFinals": 8,
-    "champion": 15,
+    "round32": 1,
+    "round16": 2,
+    "quarterFinals": 3,
+    "semiFinals": 4,
+    "champion": 10,
 }
 
 
