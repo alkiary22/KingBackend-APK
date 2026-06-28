@@ -677,7 +677,12 @@ async def admin_list_predictions(
     if match_id:
         query["match_id"] = match_id
 
-    preds = await db.predictions.find(query, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    total = await db.predictions.count_documents(query)
+
+    preds = await db.predictions.find(
+        query,
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(5000)
 
     # Build user + match lookup tables to enrich
     user_ids = list({p["user_id"] for p in preds})
@@ -720,7 +725,7 @@ async def admin_list_predictions(
                 "group": m.get("group"),
             } if m else None,
         })
-    return {"count": len(rows), "items": rows}
+    return {"count": total, "items": rows}
 
 
 
@@ -1393,8 +1398,8 @@ async def get_challenge_bracket():
 
 @api_router.put("/admin/challenge/bracket")
 async def update_challenge_bracket(data: ChallengeBracketIn, _staff=Depends(require_staff)):
-    if len(data.matches) != 16:
-        raise HTTPException(status_code=400, detail="يجب أن يكون عدد مباريات دور الـ32 هو 16 مباراة")
+    if len(data.matches) > 31:
+        raise HTTPException(status_code=400, detail="عدد مباريات التحدي يتجاوز الحد المسموح به للشجرة")
 
     matches = []
     for m in data.matches:
@@ -2258,8 +2263,8 @@ async def get_challenge_bracket():
 
 @api_router.put("/admin/challenge/bracket")
 async def update_challenge_bracket(data: ChallengeBracketIn, _staff=Depends(require_staff)):
-    if len(data.matches) != 16:
-        raise HTTPException(status_code=400, detail="يجب أن يكون عدد مباريات دور الـ32 هو 16 مباراة")
+    if len(data.matches) > 31:
+        raise HTTPException(status_code=400, detail="عدد مباريات التحدي يتجاوز الحد المسموح به للشجرة")
 
     matches = []
     for m in data.matches:
