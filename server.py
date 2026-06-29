@@ -1640,9 +1640,29 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
 
     results = data.model_dump() if hasattr(data, "model_dump") else data.dict()
 
+    old_doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    merged = (old_doc or {}).get("results", {})
+
+    for key in [
+        "round32",
+        "round16",
+        "quarterFinals",
+        "semiFinals",
+        "final",
+    ]:
+        merged.setdefault(key, {})
+        merged[key].update(results.get(key, {}))
+
+    if results.get("champion"):
+        merged["champion"] = results["champion"]
+
     doc = {
         "challenge_id": CHALLENGE_ID,
-        "results": results,
+        "results": merged,
         "updated_at": now,
     }
 
@@ -2545,9 +2565,29 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
 
     results = data.model_dump() if hasattr(data, "model_dump") else data.dict()
 
+    old_doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    merged = (old_doc or {}).get("results", {})
+
+    for key in [
+        "round32",
+        "round16",
+        "quarterFinals",
+        "semiFinals",
+        "final",
+    ]:
+        merged.setdefault(key, {})
+        merged[key].update(results.get(key, {}))
+
+    if results.get("champion"):
+        merged["champion"] = results["champion"]
+
     doc = {
         "challenge_id": CHALLENGE_ID,
-        "results": results,
+        "results": merged,
         "updated_at": now,
     }
 
