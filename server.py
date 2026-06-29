@@ -946,37 +946,84 @@ async def update_content(data: ContentUpdateIn, _admin=Depends(require_admin)):
 
 
 # ---------- Marquee ----------
-class MarqueeIn(BaseModel):
+
+class MarqueeItem(BaseModel):
+    id: str
+    enabled: bool = True
     text: str
+    speed: int = 18
+    textColor: str = "#FFD700"
+    background: str = "#000000"
+    fontSize: int = 18
+    fontWeight: str = "700"
+
+
+class MarqueeIn(BaseModel):
+    items: list[MarqueeItem] = Field(default_factory=list)
 
 
 @api_router.get("/marquee")
 async def get_marquee():
-    doc = await db.app_state.find_one({"key": "marquee"}, {"_id": 0})
+    doc = await db.app_state.find_one({"key":"marquee"},{"_id":0})
+
+    if doc and doc.get("items"):
+        return {
+            "items": doc["items"],
+            "text": next(
+                (i["text"] for i in doc["items"] if i.get("enabled")),
+                ""
+            )
+        }
+
+    text = (
+        (doc or {}).get("text")
+        or "🏆 الرعاة الرسميون لجائزة ملك التوقعات | ⭐ قيس العدار | ⭐ الياس الخياري | ⭐ حمزة القاضي | 🏆"
+    )
 
     return {
-        "text": (
-            (doc or {}).get("text")
-            or "🏆 الرعاة الرسميون لجائزة ملك التوقعات | ⭐ قيس العدار | ⭐ الياس الخياري | ⭐ حمزة القاضي | 🏆"
-        )
+        "text": text,
+        "items": [
+            {
+                "id":"1",
+                "enabled":True,
+                "text":text,
+                "speed":18,
+                "textColor":"#FFD700",
+                "background":"#000000",
+                "fontSize":18,
+                "fontWeight":"700"
+            }
+        ]
     }
 
 
 @api_router.put("/admin/marquee")
 async def update_marquee(data: MarqueeIn, _admin=Depends(require_admin)):
+
+    items=[]
+
+    for item in data.items:
+        d = item.model_dump() if hasattr(item,"model_dump") else item.dict()
+        d["text"] = str(d.get("text",""))[:500]
+        items.append(d)
+
     await db.app_state.update_one(
-        {"key": "marquee"},
+        {"key":"marquee"},
         {
-            "$set": {
-                "key": "marquee",
-                "text": data.text.strip(),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+            "$set":{
+                "key":"marquee",
+                "items":items,
+                "text":next((i["text"] for i in items if i.get("enabled")), ""),
+                "updated_at":datetime.now(timezone.utc).isoformat()
             }
         },
-        upsert=True,
+        upsert=True
     )
 
-    return {"ok": True}
+    return {
+        "ok":True,
+        "count":len(items)
+    }
 
 # ---------- Ads Slider ----------
 class AdsSliderIn(BaseModel):
