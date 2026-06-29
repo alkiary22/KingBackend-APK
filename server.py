@@ -2557,6 +2557,8 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
         upsert=True,
     )
 
+    await recalculate_challenge_scores()
+
     return {
         "success": True,
         "message": "تم حفظ نتائج التحدي",
