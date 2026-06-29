@@ -1447,7 +1447,7 @@ class ChallengePredictionIn(BaseModel):
     quarterFinals: dict = Field(default_factory=dict)
     semiFinals: dict = Field(default_factory=dict)
     final: dict = Field(default_factory=dict)
-    champion: dict
+    champion: dict = Field(default_factory=dict)
 
 
 class ChallengeResultsIn(BaseModel):
@@ -1456,7 +1456,7 @@ class ChallengeResultsIn(BaseModel):
     quarterFinals: dict = Field(default_factory=dict)
     semiFinals: dict = Field(default_factory=dict)
     final: dict = Field(default_factory=dict)
-    champion: dict
+    champion: dict = Field(default_factory=dict)
 
 
 def _team_name(value):
@@ -2314,7 +2314,7 @@ class ChallengePredictionIn(BaseModel):
     quarterFinals: dict = Field(default_factory=dict)
     semiFinals: dict = Field(default_factory=dict)
     final: dict = Field(default_factory=dict)
-    champion: dict
+    champion: dict = Field(default_factory=dict)
 
 
 class ChallengeResultsIn(BaseModel):
@@ -2323,7 +2323,7 @@ class ChallengeResultsIn(BaseModel):
     quarterFinals: dict = Field(default_factory=dict)
     semiFinals: dict = Field(default_factory=dict)
     final: dict = Field(default_factory=dict)
-    champion: dict
+    champion: dict = Field(default_factory=dict)
 
 
 def _team_name(value):
