@@ -944,6 +944,40 @@ async def update_content(data: ContentUpdateIn, _admin=Depends(require_admin)):
     return {"ok": True, "count": len(clean)}
 
 
+
+# ---------- Marquee ----------
+class MarqueeIn(BaseModel):
+    text: str
+
+
+@api_router.get("/marquee")
+async def get_marquee():
+    doc = await db.app_state.find_one({"key": "marquee"}, {"_id": 0})
+
+    return {
+        "text": (
+            (doc or {}).get("text")
+            or "🏆 الرعاة الرسميون لجائزة ملك التوقعات | ⭐ قيس العدار | ⭐ الياس الخياري | ⭐ حمزة القاضي | 🏆"
+        )
+    }
+
+
+@api_router.put("/admin/marquee")
+async def update_marquee(data: MarqueeIn, _admin=Depends(require_admin)):
+    await db.app_state.update_one(
+        {"key": "marquee"},
+        {
+            "$set": {
+                "key": "marquee",
+                "text": data.text.strip(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+        upsert=True,
+    )
+
+    return {"ok": True}
+
 # ---------- Ads Slider ----------
 class AdsSliderIn(BaseModel):
     images: list[str] = Field(default_factory=list, max_length=8)
