@@ -1571,6 +1571,8 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
         upsert=True,
     )
 
+    await recalculate_challenge_scores()
+
     return {
         "success": True,
         "message": "تم حفظ نتائج التحدي",
@@ -2364,6 +2366,44 @@ def calculate_challenge_score(prediction: dict, results: dict):
     return score, details
 
 
+async def recalculate_challenge_scores():
+    results_doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    if not results_doc:
+        return
+
+    results = results_doc.get("results", {})
+
+    predictions = await db.challenge_predictions.find(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    ).to_list(10000)
+
+    for pred in predictions:
+        score, details = calculate_challenge_score(
+            pred.get("prediction", {}),
+            results,
+        )
+
+        await db.challenge_predictions.update_one(
+            {
+                "challenge_id": CHALLENGE_ID,
+                "user_id": pred["user_id"],
+            },
+            {
+                "$set": {
+                    "score": score,
+                    "details": details,
+                    "score_updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+        )
+
+
+
 @api_router.post("/challenge/prediction")
 async def save_challenge_prediction(data: ChallengePredictionIn, user=Depends(get_current_user)):
     status_info = challenge_lock_status()
@@ -2619,6 +2659,54 @@ async def get_challenge_status():
 async def start_auto_sync_results():
     asyncio.create_task(auto_sync_results_loop())
     asyncio.create_task(auto_match_reminders_loop())
+
+
+
+
+# ===== TEMP ADMIN: Recalculate Challenge Scores =====
+@api_router.post("/admin/challenge/recalculate")
+async def admin_recalculate_challenge_scores(_staff=Depends(require_staff)):
+    await recalculate_challenge_scores()
+
+    results_doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    predictions = await db.challenge_predictions.find(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    ).to_list(10000)
+
+    updated = 0
+
+    for pred in predictions:
+        score, details = calculate_challenge_score(
+            pred.get("prediction", {}),
+            (results_doc or {}).get("results", {}),
+        )
+
+        await db.challenge_predictions.update_one(
+            {
+                "challenge_id": CHALLENGE_ID,
+                "user_id": pred["user_id"],
+            },
+            {
+                "$set": {
+                    "score": score,
+                    "details": details,
+                }
+            },
+        )
+
+        updated += 1
+
+    return {
+        "success": True,
+        "updated": updated,
+    }
+
+# ===== END TEMP =====
 
 
 app.include_router(api_router)
