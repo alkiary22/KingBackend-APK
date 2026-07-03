@@ -795,23 +795,6 @@ async def apply_match_result(match_id: str, home_score: int, away_score: int, so
         if delta:
             await db.users.update_one({"id": p["user_id"]}, {"$inc": {"total_points": delta}})
     # Create notifications only on first-time finalization (avoid spam on edits)
-
-    # مزامنة مجموع النقاط الحقيقي لكل مستخدم
-    affected_users = {pred["user_id"] for pred in predictions}
-
-    for user_id in affected_users:
-        agg = await db.predictions.aggregate([
-            {"$match": {"user_id": user_id}},
-            {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$points", 0]}}}}
-        ]).to_list(1)
-
-        total = agg[0]["total"] if agg else 0
-
-        await db.users.update_one(
-            {"id": user_id},
-            {"$set": {"total_points": total}}
-        )
-
     if not was_finished:
         await create_notifications_for_match({**match, "id": match_id}, home_score, away_score, source)
 

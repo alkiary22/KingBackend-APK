@@ -795,23 +795,6 @@ async def apply_match_result(match_id: str, home_score: int, away_score: int, so
         if delta:
             await db.users.update_one({"id": p["user_id"]}, {"$inc": {"total_points": delta}})
     # Create notifications only on first-time finalization (avoid spam on edits)
-
-    # مزامنة مجموع النقاط الحقيقي لكل مستخدم
-    affected_users = {pred["user_id"] for pred in predictions}
-
-    for user_id in affected_users:
-        agg = await db.predictions.aggregate([
-            {"$match": {"user_id": user_id}},
-            {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$points", 0]}}}}
-        ]).to_list(1)
-
-        total = agg[0]["total"] if agg else 0
-
-        await db.users.update_one(
-            {"id": user_id},
-            {"$set": {"total_points": total}}
-        )
-
     if not was_finished:
         await create_notifications_for_match({**match, "id": match_id}, home_score, away_score, source)
 
@@ -1143,14 +1126,6 @@ async def send_push_to_user(user_id: str, title: str, body: str, data: dict | No
             msg = messaging.Message(
                 notification=messaging.Notification(title=title, body=body),
                 data=payload_data,
-                android=messaging.AndroidConfig(
-                    priority="high",
-                    notification=messaging.AndroidNotification(
-                        channel_id="king_high",
-                        sound="default",
-                        default_vibrate_timings=True,
-                    ),
-                ),
                 webpush=messaging.WebpushConfig(
                     fcm_options=messaging.WebpushFCMOptions(link=link)
                 ),
@@ -1201,14 +1176,6 @@ async def send_push_to_all_users(title: str, body: str, data: dict | None = None
             msg = messaging.Message(
                 notification=messaging.Notification(title=title, body=body),
                 data=payload_data,
-                android=messaging.AndroidConfig(
-                    priority="high",
-                    notification=messaging.AndroidNotification(
-                        channel_id="king_high",
-                        sound="default",
-                        default_vibrate_timings=True,
-                    ),
-                ),
                 webpush=messaging.WebpushConfig(
                     fcm_options=messaging.WebpushFCMOptions(link=link)
                 ),
@@ -1613,46 +1580,6 @@ def calculate_challenge_score(prediction: dict, results: dict):
     return score, details
 
 
-
-async def recalculate_challenge_scores():
-    results_doc = await db.challenge_results.find_one(
-        {"challenge_id": CHALLENGE_ID},
-        {"_id": 0},
-    )
-
-    if not results_doc:
-        return
-
-    results = results_doc.get("results", {})
-
-    predictions = await db.challenge_predictions.find(
-        {"challenge_id": CHALLENGE_ID},
-        {"_id": 0},
-    ).to_list(10000)
-
-    now = datetime.now(timezone.utc).isoformat()
-
-    for pred in predictions:
-        score, details = calculate_challenge_score(
-            pred.get("prediction", {}),
-            results,
-        )
-
-        await db.challenge_predictions.update_one(
-            {
-                "challenge_id": CHALLENGE_ID,
-                "user_id": pred["user_id"],
-            },
-            {
-                "$set": {
-                    "score": score,
-                    "details": details,
-                    "score_updated_at": now,
-                }
-            },
-        )
-
-
 @api_router.post("/challenge/prediction")
 async def save_challenge_prediction(data: ChallengePredictionIn, user=Depends(get_current_user)):
     status_info = challenge_lock_status()
@@ -1713,29 +1640,9 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
 
     results = data.model_dump() if hasattr(data, "model_dump") else data.dict()
 
-    old_doc = await db.challenge_results.find_one(
-        {"challenge_id": CHALLENGE_ID},
-        {"_id": 0},
-    )
-
-    merged = (old_doc or {}).get("results", {})
-
-    for key in [
-        "round32",
-        "round16",
-        "quarterFinals",
-        "semiFinals",
-        "final",
-    ]:
-        merged.setdefault(key, {})
-        merged[key].update(results.get(key, {}))
-
-    if results.get("champion"):
-        merged["champion"] = results["champion"]
-
     doc = {
         "challenge_id": CHALLENGE_ID,
-        "results": merged,
+        "results": results,
         "updated_at": now,
     }
 
@@ -2381,9 +2288,454 @@ async def fix_match_time(data: MatchTimeByTeamsIn, _staff=Depends(require_staff)
 
 
 
+# ===== Challenge Bracket API =====
+
+DEFAULT_CHALLENGE_ROUND32 = [
+    {"id": "r32_1", "date": "الإثنين، 29 يونيو", "time": "23:30 مكة", "home": {"name": "كوت ديفوار", "flag": "🇨🇮"}, "away": {"name": "التشيك", "flag": "🇨🇿"}},
+    {"id": "r32_2", "date": "الأربعاء، 1 يوليو", "time": "00:00 مكة", "home": {"name": "فرنسا", "flag": "🇫🇷"}, "away": {"name": "الرأس الأخضر", "flag": "🇨🇻"}},
+    {"id": "r32_3", "date": "الأحد، 28 يونيو", "time": "22:00 مكة", "home": {"name": "كوريا الجنوبية", "flag": "🇰🇷"}, "away": {"name": "البوسنة", "flag": "🇧🇦"}},
+    {"id": "r32_4", "date": "الثلاثاء، 30 يونيو", "time": "04:00 مكة", "home": {"name": "هولندا", "flag": "🇳🇱"}, "away": {"name": "البرازيل", "flag": "🇧🇷"}},
+    {"id": "r32_5", "date": "الجمعة، 3 يوليو", "time": "02:00 مكة", "home": {"name": "أوزبكستان", "flag": "🇺🇿"}, "away": {"name": "كرواتيا", "flag": "🇭🇷"}},
+    {"id": "r32_6", "date": "الخميس، 2 يوليو", "time": "22:00 مكة", "home": {"name": "إسبانيا", "flag": "🇪🇸"}, "away": {"name": "النمسا", "flag": "🇦🇹"}},
+    {"id": "r32_7", "date": "الخميس، 2 يوليو", "time": "03:00 مكة", "home": {"name": "أستراليا", "flag": "🇦🇺"}, "away": {"name": "كندا", "flag": "🇨🇦"}},
+    {"id": "r32_8", "date": "الأربعاء، 1 يوليو", "time": "23:00 مكة", "home": {"name": "المغرب", "flag": "🇲🇦"}, "away": {"name": "أمريكا", "flag": "🇺🇸"}},
+    {"id": "r32_9", "date": "السبت، 4 يوليو", "time": "21:00 مكة", "home": {"name": "الأرجنتين", "flag": "🇦🇷"}, "away": {"name": "اليابان", "flag": "🇯🇵"}},
+    {"id": "r32_10", "date": "الأحد، 5 يوليو", "time": "00:00 مكة", "home": {"name": "إنجلترا", "flag": "🏴"}, "away": {"name": "السنغال", "flag": "🇸🇳"}},
+    {"id": "r32_11", "date": "الإثنين، 6 يوليو", "time": "22:00 مكة", "home": {"name": "ألمانيا", "flag": "🇩🇪"}, "away": {"name": "غانا", "flag": "🇬🇭"}},
+    {"id": "r32_12", "date": "الثلاثاء، 7 يوليو", "time": "03:00 مكة", "home": {"name": "إيطاليا", "flag": "🇮🇹"}, "away": {"name": "مصر", "flag": "🇪🇬"}},
+    {"id": "r32_13", "date": "الأربعاء، 8 يوليو", "time": "22:00 مكة", "home": {"name": "البرتغال", "flag": "🇵🇹"}, "away": {"name": "المكسيك", "flag": "🇲🇽"}},
+    {"id": "r32_14", "date": "الخميس، 9 يوليو", "time": "23:00 مكة", "home": {"name": "أوروجواي", "flag": "🇺🇾"}, "away": {"name": "السعودية", "flag": "🇸🇦"}},
+    {"id": "r32_15", "date": "الجمعة، 10 يوليو", "time": "22:00 مكة", "home": {"name": "بلجيكا", "flag": "🇧🇪"}, "away": {"name": "كولومبيا", "flag": "🇨🇴"}},
+    {"id": "r32_16", "date": "السبت، 11 يوليو", "time": "00:00 مكة", "home": {"name": "سويسرا", "flag": "🇨🇭"}, "away": {"name": "الدنمارك", "flag": "🇩🇰"}},
+]
+
+
+class ChallengeTeamIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    flag: str = Field(min_length=1, max_length=12)
+
+
+class ChallengeMatchIn(BaseModel):
+    id: str
+    date: str = Field(min_length=1, max_length=80)
+    time: str = Field(min_length=1, max_length=80)
+    home: ChallengeTeamIn
+    away: ChallengeTeamIn
+
+
+class ChallengeBracketIn(BaseModel):
+    matches: List[ChallengeMatchIn]
+
+
+@api_router.get("/challenge/bracket")
+async def get_challenge_bracket():
+    doc = await db.challenge_brackets.find_one(
+        {"id": "worldcup2026_round32"},
+        {"_id": 0}
+    )
+
+    if not doc:
+        return {
+            "id": "worldcup2026_round32",
+            "matches": DEFAULT_CHALLENGE_ROUND32,
+            "updated_at": None,
+        }
+
+    return doc
+
+
+@api_router.put("/admin/challenge/bracket")
+async def update_challenge_bracket(data: ChallengeBracketIn, _staff=Depends(require_staff)):
+    if len(data.matches) > 31:
+        raise HTTPException(status_code=400, detail="عدد مباريات التحدي يتجاوز الحد المسموح به للشجرة")
+
+    matches = []
+    for m in data.matches:
+        if hasattr(m, "model_dump"):
+            matches.append(m.model_dump())
+        else:
+            matches.append(m.dict())
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    doc = {
+        "id": "worldcup2026_round32",
+        "matches": matches,
+        "updated_at": now,
+    }
+
+    await db.challenge_brackets.update_one(
+        {"id": "worldcup2026_round32"},
+        {"$set": doc},
+        upsert=True
+    )
+
+    return {"success": True, "updated_at": now, "matches": matches}
+
+# ===== End Challenge Bracket API =====
 
 
 
+# ===== Challenge Predictions, Results, Scores API =====
+
+CHALLENGE_ID = "worldcup2026_round32"
+
+CHALLENGE_POINTS = {
+    "round32": 1,
+    "round16": 2,
+    "quarterFinals": 3,
+    "semiFinals": 4,
+    "champion": 10,
+}
+
+
+class ChallengePredictionIn(BaseModel):
+    round32: dict = Field(default_factory=dict)
+    round16: dict = Field(default_factory=dict)
+    quarterFinals: dict = Field(default_factory=dict)
+    semiFinals: dict = Field(default_factory=dict)
+    final: dict = Field(default_factory=dict)
+    champion: dict = Field(default_factory=dict)
+
+
+class ChallengeResultsIn(BaseModel):
+    round32: dict = Field(default_factory=dict)
+    round16: dict = Field(default_factory=dict)
+    quarterFinals: dict = Field(default_factory=dict)
+    semiFinals: dict = Field(default_factory=dict)
+    final: dict = Field(default_factory=dict)
+    champion: dict = Field(default_factory=dict)
+
+
+def _team_name(value):
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value.get("name")
+    return str(value)
+
+
+def _same_team(a, b):
+    return bool(_team_name(a)) and _team_name(a) == _team_name(b)
+
+
+def calculate_challenge_score(prediction: dict, results: dict):
+    score = 0
+    details = {
+        "round32": 0,
+        "round16": 0,
+        "quarterFinals": 0,
+        "semiFinals": 0,
+        "champion": 0,
+    }
+
+    for round_key in ["round32", "round16", "quarterFinals", "semiFinals"]:
+        pred_round = prediction.get(round_key, {}) or {}
+        real_round = results.get(round_key, {}) or {}
+        points = CHALLENGE_POINTS[round_key]
+
+        for match_id, predicted_team in pred_round.items():
+            real_team = real_round.get(match_id)
+            if _same_team(predicted_team, real_team):
+                score += points
+                details[round_key] += points
+
+    if _same_team(prediction.get("champion"), results.get("champion")):
+        score += CHALLENGE_POINTS["champion"]
+        details["champion"] += CHALLENGE_POINTS["champion"]
+
+    return score, details
+
+
+async def recalculate_challenge_scores():
+    results_doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    if not results_doc:
+        return
+
+    results = results_doc.get("results", {})
+
+    predictions = await db.challenge_predictions.find(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    ).to_list(10000)
+
+    for pred in predictions:
+        score, details = calculate_challenge_score(
+            pred.get("prediction", {}),
+            results,
+        )
+
+        await db.challenge_predictions.update_one(
+            {
+                "challenge_id": CHALLENGE_ID,
+                "user_id": pred["user_id"],
+            },
+            {
+                "$set": {
+                    "score": score,
+                    "details": details,
+                    "score_updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+        )
+
+
+
+@api_router.post("/challenge/prediction")
+async def save_challenge_prediction(data: ChallengePredictionIn, user=Depends(get_current_user)):
+    status_info = challenge_lock_status()
+    if status_info.get("locked"):
+        raise HTTPException(
+            status_code=403,
+            detail="تم إغلاق توقع التحدي مع بداية أول مباراة في دور الـ32"
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    prediction = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+
+    doc = {
+        "challenge_id": CHALLENGE_ID,
+        "user_id": user["id"],
+        "user_name": user.get("name"),
+        "prediction": prediction,
+        "updated_at": now,
+    }
+
+    await db.challenge_predictions.update_one(
+        {
+            "challenge_id": CHALLENGE_ID,
+            "user_id": user["id"],
+        },
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+    return {
+        "success": True,
+        "message": "تم حفظ توقع التحدي",
+        "prediction": prediction,
+        "updated_at": now,
+    }
+
+
+@api_router.get("/challenge/my-prediction")
+async def get_my_challenge_prediction(user=Depends(get_current_user)):
+    doc = await db.challenge_predictions.find_one(
+        {
+            "challenge_id": CHALLENGE_ID,
+            "user_id": user["id"],
+        },
+        {"_id": 0},
+    )
+
+    return {
+        "prediction": doc.get("prediction") if doc else None,
+        "updated_at": doc.get("updated_at") if doc else None,
+    }
+
+
+@api_router.put("/admin/challenge/results")
+async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(require_staff)):
+    now = datetime.now(timezone.utc).isoformat()
+
+    results = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+
+    doc = {
+        "challenge_id": CHALLENGE_ID,
+        "results": results,
+        "updated_at": now,
+    }
+
+    await db.challenge_results.update_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+    await recalculate_challenge_scores()
+
+    return {
+        "success": True,
+        "message": "تم حفظ نتائج التحدي",
+        "results": results,
+        "updated_at": now,
+    }
+
+
+@api_router.post("/admin/challenge/results/reset")
+async def reset_challenge_results(_staff=Depends(require_staff)):
+    await db.challenge_results.delete_one({"challenge_id": CHALLENGE_ID})
+    return {"success": True, "message": "تم تصفير نتائج التحدي بنجاح"}
+
+
+
+@api_router.get("/challenge/results")
+async def get_challenge_results():
+    doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    return {
+        "results": doc.get("results") if doc else None,
+        "updated_at": doc.get("updated_at") if doc else None,
+    }
+
+
+@api_router.get("/challenge/my-score")
+async def get_my_challenge_score(user=Depends(get_current_user)):
+    pred_doc = await db.challenge_predictions.find_one(
+        {
+            "challenge_id": CHALLENGE_ID,
+            "user_id": user["id"],
+        },
+        {"_id": 0},
+    )
+
+    results_doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    if not pred_doc:
+        return {
+            "score": 0,
+            "details": None,
+            "has_prediction": False,
+            "has_results": bool(results_doc),
+        }
+
+    if not results_doc:
+        return {
+            "score": 0,
+            "details": None,
+            "has_prediction": True,
+            "has_results": False,
+        }
+
+    score, details = calculate_challenge_score(
+        pred_doc.get("prediction", {}),
+        results_doc.get("results", {}),
+    )
+
+    return {
+        "score": score,
+        "details": details,
+        "has_prediction": True,
+        "has_results": True,
+    }
+
+
+@api_router.get("/challenge/leaderboard")
+async def get_challenge_leaderboard(limit: int = 50):
+    results_doc = await db.challenge_results.find_one(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    predictions = await db.challenge_predictions.find(
+        {"challenge_id": CHALLENGE_ID},
+        {"_id": 0},
+    ).to_list(10000)
+
+    user_ids = [p.get("user_id") for p in predictions if p.get("user_id")]
+    users_map = {}
+
+    if user_ids:
+        users = await db.users.find(
+            {"id": {"$in": user_ids}},
+            {"_id": 0, "id": 1, "name": 1, "avatar": 1, "role": 1},
+        ).to_list(10000)
+
+        users_map = {u["id"]: u for u in users}
+
+    rows = []
+
+    for pred in predictions:
+        user_id = pred.get("user_id")
+        user_doc = users_map.get(user_id, {})
+
+        score = 0
+        details = None
+
+        if results_doc:
+            score, details = calculate_challenge_score(
+                pred.get("prediction", {}),
+                results_doc.get("results", {}),
+            )
+
+        champion = (pred.get("prediction") or {}).get("champion") or {}
+
+        rows.append({
+            "user_id": user_id,
+            "name": user_doc.get("name") or pred.get("user_name") or "مستخدم",
+            "avatar": user_doc.get("avatar"),
+            "role": user_doc.get("role", "user"),
+            "score": score,
+            "details": details,
+            "champion": champion,
+            "updated_at": pred.get("updated_at"),
+        })
+
+    rows.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    for i, row in enumerate(rows, start=1):
+        row["rank"] = i
+
+    return {
+        "has_results": bool(results_doc),
+        "count": len(rows),
+        "items": rows[:max(1, min(limit, 100))],
+    }
+
+# ===== End Challenge Predictions, Results, Scores API =====
+
+
+
+# ===== Challenge Lock API =====
+
+# وقت إغلاق توقع التحدي = بداية أول مباراة في دور الـ32
+# الافتراضي: الإثنين 29 يونيو 2026 الساعة 23:30 مكة = 20:30 UTC
+CHALLENGE_LOCK_AT = os.environ.get("CHALLENGE_LOCK_AT", "2026-06-28T19:00:00+00:00")
+
+
+def _parse_challenge_lock_at():
+    raw = CHALLENGE_LOCK_AT
+    try:
+        if raw.endswith("Z"):
+            raw = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        # في حال كان التاريخ غير صحيح لا نكسر التطبيق، ونغلق حسب التاريخ الافتراضي
+        return datetime(2026, 6, 29, 20, 30, tzinfo=timezone.utc)
+
+
+def challenge_lock_status():
+    lock_at = _parse_challenge_lock_at()
+    now = datetime.now(timezone.utc)
+    locked = now >= lock_at
+
+    return {
+        "locked": locked,
+        "lock_at": lock_at.isoformat(),
+        "server_time": now.isoformat(),
+        "message": "توقع التحدي مغلق" if locked else "توقع التحدي مفتوح",
+    }
+
+
+@api_router.get("/challenge/status")
+async def get_challenge_status():
+    return challenge_lock_status()
+
+# ===== End Challenge Lock API =====
 
 
 @app.on_event("startup")

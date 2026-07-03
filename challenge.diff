@@ -1,0 +1,217 @@
+diff --git a/server.py b/server.py
+index 3a192d8..143f7e5 100644
+--- a/server.py
++++ b/server.py
+@@ -944,6 +944,87 @@ async def update_content(data: ContentUpdateIn, _admin=Depends(require_admin)):
+     return {"ok": True, "count": len(clean)}
+ 
+ 
++
++# ---------- Marquee ----------
++
++class MarqueeItem(BaseModel):
++    id: str
++    enabled: bool = True
++    text: str
++    speed: int = 18
++    textColor: str = "#FFD700"
++    background: str = "#000000"
++    fontSize: int = 18
++    fontWeight: str = "700"
++
++
++class MarqueeIn(BaseModel):
++    items: list[MarqueeItem] = Field(default_factory=list)
++
++
++@api_router.get("/marquee")
++async def get_marquee():
++    doc = await db.app_state.find_one({"key":"marquee"},{"_id":0})
++
++    if doc and doc.get("items"):
++        return {
++            "items": doc["items"],
++            "text": next(
++                (i["text"] for i in doc["items"] if i.get("enabled")),
++                ""
++            )
++        }
++
++    text = (
++        (doc or {}).get("text")
++        or "🏆 الرعاة الرسميون لجائزة ملك التوقعات | ⭐ قيس العدار | ⭐ الياس الخياري | ⭐ حمزة القاضي | 🏆"
++    )
++
++    return {
++        "text": text,
++        "items": [
++            {
++                "id":"1",
++                "enabled":True,
++                "text":text,
++                "speed":18,
++                "textColor":"#FFD700",
++                "background":"#000000",
++                "fontSize":18,
++                "fontWeight":"700"
++            }
++        ]
++    }
++
++
++@api_router.put("/admin/marquee")
++async def update_marquee(data: MarqueeIn, _admin=Depends(require_admin)):
++
++    items=[]
++
++    for item in data.items:
++        d = item.model_dump() if hasattr(item,"model_dump") else item.dict()
++        d["text"] = str(d.get("text",""))[:500]
++        items.append(d)
++
++    await db.app_state.update_one(
++        {"key":"marquee"},
++        {
++            "$set":{
++                "key":"marquee",
++                "items":items,
++                "text":next((i["text"] for i in items if i.get("enabled")), ""),
++                "updated_at":datetime.now(timezone.utc).isoformat()
++            }
++        },
++        upsert=True
++    )
++
++    return {
++        "ok":True,
++        "count":len(items)
++    }
++
+ # ---------- Ads Slider ----------
+ class AdsSliderIn(BaseModel):
+     images: list[str] = Field(default_factory=list, max_length=8)
+@@ -1447,7 +1528,7 @@ class ChallengePredictionIn(BaseModel):
+     quarterFinals: dict = Field(default_factory=dict)
+     semiFinals: dict = Field(default_factory=dict)
+     final: dict = Field(default_factory=dict)
+-    champion: dict
++    champion: dict = Field(default_factory=dict)
+ 
+ 
+ class ChallengeResultsIn(BaseModel):
+@@ -1456,7 +1537,7 @@ class ChallengeResultsIn(BaseModel):
+     quarterFinals: dict = Field(default_factory=dict)
+     semiFinals: dict = Field(default_factory=dict)
+     final: dict = Field(default_factory=dict)
+-    champion: dict
++    champion: dict = Field(default_factory=dict)
+ 
+ 
+ def _team_name(value):
+@@ -1559,9 +1640,29 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
+ 
+     results = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+ 
++    old_doc = await db.challenge_results.find_one(
++        {"challenge_id": CHALLENGE_ID},
++        {"_id": 0},
++    )
++
++    merged = (old_doc or {}).get("results", {})
++
++    for key in [
++        "round32",
++        "round16",
++        "quarterFinals",
++        "semiFinals",
++        "final",
++    ]:
++        merged.setdefault(key, {})
++        merged[key].update(results.get(key, {}))
++
++    if results.get("champion"):
++        merged["champion"] = results["champion"]
++
+     doc = {
+         "challenge_id": CHALLENGE_ID,
+-        "results": results,
++        "results": merged,
+         "updated_at": now,
+     }
+ 
+@@ -1715,7 +1816,7 @@ async def get_challenge_leaderboard(limit: int = 50):
+ 
+ # وقت إغلاق توقع التحدي = بداية أول مباراة في دور الـ32
+ # الافتراضي: الإثنين 29 يونيو 2026 الساعة 23:30 مكة = 20:30 UTC
+-CHALLENGE_LOCK_AT = os.environ.get("CHALLENGE_LOCK_AT", "2026-06-29T20:30:00+00:00")
++CHALLENGE_LOCK_AT = os.environ.get("CHALLENGE_LOCK_AT", "2026-06-28T19:00:00+00:00")
+ 
+ 
+ def _parse_challenge_lock_at():
+@@ -2314,7 +2415,7 @@ class ChallengePredictionIn(BaseModel):
+     quarterFinals: dict = Field(default_factory=dict)
+     semiFinals: dict = Field(default_factory=dict)
+     final: dict = Field(default_factory=dict)
+-    champion: dict
++    champion: dict = Field(default_factory=dict)
+ 
+ 
+ class ChallengeResultsIn(BaseModel):
+@@ -2323,7 +2424,7 @@ class ChallengeResultsIn(BaseModel):
+     quarterFinals: dict = Field(default_factory=dict)
+     semiFinals: dict = Field(default_factory=dict)
+     final: dict = Field(default_factory=dict)
+-    champion: dict
++    champion: dict = Field(default_factory=dict)
+ 
+ 
+ def _team_name(value):
+@@ -2464,9 +2565,29 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
+ 
+     results = data.model_dump() if hasattr(data, "model_dump") else data.dict()
+ 
++    old_doc = await db.challenge_results.find_one(
++        {"challenge_id": CHALLENGE_ID},
++        {"_id": 0},
++    )
++
++    merged = (old_doc or {}).get("results", {})
++
++    for key in [
++        "round32",
++        "round16",
++        "quarterFinals",
++        "semiFinals",
++        "final",
++    ]:
++        merged.setdefault(key, {})
++        merged[key].update(results.get(key, {}))
++
++    if results.get("champion"):
++        merged["champion"] = results["champion"]
++
+     doc = {
+         "challenge_id": CHALLENGE_ID,
+-        "results": results,
++        "results": merged,
+         "updated_at": now,
+     }
+ 
+@@ -2476,6 +2597,8 @@ async def save_challenge_results(data: ChallengeResultsIn, _staff=Depends(requir
+         upsert=True,
+     )
+ 
++    await recalculate_challenge_scores()
++
+     return {
+         "success": True,
+         "message": "تم حفظ نتائج التحدي",
+@@ -2618,7 +2741,7 @@ async def get_challenge_leaderboard(limit: int = 50):
+ 
+ # وقت إغلاق توقع التحدي = بداية أول مباراة في دور الـ32
+ # الافتراضي: الإثنين 29 يونيو 2026 الساعة 23:30 مكة = 20:30 UTC
+-CHALLENGE_LOCK_AT = os.environ.get("CHALLENGE_LOCK_AT", "2026-06-29T20:30:00+00:00")
++CHALLENGE_LOCK_AT = os.environ.get("CHALLENGE_LOCK_AT", "2026-06-28T19:00:00+00:00")
+ 
+ 
+ def _parse_challenge_lock_at():
