@@ -1145,10 +1145,14 @@ async def send_push_to_user(user_id: str, title: str, body: str, data: dict | No
                 data=payload_data,
                 android=messaging.AndroidConfig(
                     priority="high",
+                    ttl=3600,
                     notification=messaging.AndroidNotification(
                         channel_id="king_high",
+                        priority="high",
                         sound="default",
+                        default_sound=True,
                         default_vibrate_timings=True,
+                        visibility="public",
                     ),
                 ),
                 webpush=messaging.WebpushConfig(
@@ -1203,10 +1207,14 @@ async def send_push_to_all_users(title: str, body: str, data: dict | None = None
                 data=payload_data,
                 android=messaging.AndroidConfig(
                     priority="high",
+                    ttl=3600,
                     notification=messaging.AndroidNotification(
                         channel_id="king_high",
+                        priority="high",
                         sound="default",
+                        default_sound=True,
                         default_vibrate_timings=True,
+                        visibility="public",
                     ),
                 ),
                 webpush=messaging.WebpushConfig(
