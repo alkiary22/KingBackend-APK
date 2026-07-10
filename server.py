@@ -24,6 +24,8 @@ from fixtures_data import GROUP_FIXTURES, GROUP_LABEL
 from sportsdb import fetch_world_cup_events, normalize_team_code, parse_score, FINISHED_STATUSES
 from content_defaults import DEFAULT_CONTENT
 import asyncio
+import hashlib
+import json
 import httpx
 
 # Firebase Cloud Messaging
@@ -230,6 +232,51 @@ def _parse_dt(value: str | None) -> Optional[datetime]:
         return None
 
 MECCA_TZ = timezone(timedelta(hours=3))
+
+API_CACHE_TTL_SECONDS = 1800  # 30 minutes
+
+async def cached_api_football_get(path:str, params:dict|None=None):
+
+    params=params or {}
+
+    key=hashlib.sha1(
+        (path+"|"+json.dumps(params,sort_keys=True)).encode()
+    ).hexdigest()
+
+    now=datetime.now(timezone.utc)
+
+    cached=await db.competition_cache.find_one(
+        {"_id":key},
+        {"_id":0}
+    )
+
+    if cached:
+
+        updated=datetime.fromisoformat(
+            cached["updated_at"]
+        )
+
+        age=(now-updated).total_seconds()
+
+        if age<API_CACHE_TTL_SECONDS:
+
+            return cached["data"]
+
+    data=await cached_api_football_get(path,params)
+
+    await db.competition_cache.update_one(
+        {"_id":key},
+        {
+            "$set":{
+                "data":data,
+                "updated_at":now.isoformat()
+            }
+        },
+        upsert=True
+    )
+
+    return data
+
 
 async def upsert_api_football_team(team: dict):
     """team object from API-Football: {id, name, logo, winner?}"""
@@ -1227,14 +1274,14 @@ async def admin_api_football_leagues(search: Optional[str] = None, _staff=Depend
     params = {}
     if search:
         params["search"] = search
-    data = await api_football_get("/leagues", params)
+    data = await cached_api_football_get("/leagues", params)
     items = [simplify_league_row(x) for x in (data.get("response") or [])]
     return {"count": len(items), "items": items}
 
 
 @api_router.get("/admin/api-football/seasons")
 async def admin_api_football_seasons(league_id: int, _staff=Depends(require_staff)):
-    data = await api_football_get("/leagues", {"id": league_id})
+    data = await cached_api_football_get("/leagues", {"id": league_id})
     resp = (data.get("response") or [])
     if not resp:
         return {"league_id": league_id, "seasons": [], "current_season": None}
@@ -1244,7 +1291,7 @@ async def admin_api_football_seasons(league_id: int, _staff=Depends(require_staf
 
 @api_router.get("/admin/api-football/rounds")
 async def admin_api_football_rounds(league_id: int, season: int, _staff=Depends(require_staff)):
-    data = await api_football_get("/fixtures/rounds", {"league": league_id, "season": season})
+    data = await cached_api_football_get("/fixtures/rounds", {"league": league_id, "season": season})
     rounds = data.get("response") or []
     items = [{"round_en": r, "round_ar": translate_round_ar(r)} for r in rounds]
     return {"count": len(items), "items": items}
@@ -1266,7 +1313,7 @@ async def admin_api_football_import_fixtures(data: AFImportFixturesIn, _staff=De
     if data.to_date:
         params["to"] = data.to_date
 
-    payload = await api_football_get("/fixtures", params)
+    payload = await cached_api_football_get("/fixtures", params)
     fixtures = payload.get("response") or []
 
     created = 0
@@ -1587,7 +1634,7 @@ async def admin_api_football_sync_results(_staff=Depends(require_staff)):
 
         checked += 1
         try:
-            payload = await api_football_get("/fixtures", {"id": int(fid)})
+            payload = await cached_api_football_get("/fixtures", {"id": int(fid)})
             resp = payload.get("response") or []
             if not resp:
                 continue
@@ -1663,7 +1710,7 @@ async def football_leagues(search: Optional[str] = None):
     params = {}
     if search:
         params["search"] = search
-    data = await api_football_get("/leagues", params)
+    data = await cached_api_football_get("/leagues", params)
     items = [simplify_league_row(x) for x in (data.get("response") or [])]
     return {"count": len(items), "items": items}
 
@@ -1697,7 +1744,7 @@ async def football_fixtures(
     if status_short:
         params["status"] = status_short
 
-    payload = await api_football_get("/fixtures", params)
+    payload = await cached_api_football_get("/fixtures", params)
     resp = payload.get("response") or []
     items = [simplify_fixture(x) for x in resp]
     return {"count": len(items), "items": items}
@@ -1727,7 +1774,7 @@ async def football_live():
 async def football_finished(date: Optional[str] = None):
     d = date or datetime.now(timezone.utc).date().isoformat()
     # status=FT returns finished, but some competitions use AET/PEN; for broad we fetch date and filter here
-    payload = await api_football_get("/fixtures", {"date": d})
+    payload = await cached_api_football_get("/fixtures", {"date": d})
     resp = payload.get("response") or []
     items = []
     for x in resp:
@@ -3276,7 +3323,7 @@ async def admin_recalculate_challenge_scores(_staff=Depends(require_staff)):
 @api_router.get("/competitions")
 async def get_competitions():
 
-    data = await api_football_get(
+    data = await cached_api_football_get(
         "leagues",
         {
             "current": "true"
@@ -3331,7 +3378,7 @@ async def get_competition_matches(
     season: int = CURRENT_API_FOOTBALL_SEASON,
 ):
 
-    data = await api_football_get(
+    data = await cached_api_football_get(
         "fixtures",
         {
             "league": league_id,
@@ -3361,7 +3408,7 @@ async def get_competition_standings(
     season: int = CURRENT_API_FOOTBALL_SEASON,
 ):
 
-    data = await api_football_get(
+    data = await cached_api_football_get(
         "standings",
         {
             "league": league_id,
@@ -3423,7 +3470,7 @@ async def get_competition_teams(
     season:int=CURRENT_API_FOOTBALL_SEASON,
 ):
 
-    data=await api_football_get(
+    data=await cached_api_football_get(
         "teams",
         {
             "league":league_id,
@@ -3457,7 +3504,7 @@ async def get_competition_scorers(
     season:int=CURRENT_API_FOOTBALL_SEASON,
 ):
 
-    data=await api_football_get(
+    data=await cached_api_football_get(
         "players/topscorers",
         {
             "league":league_id,
