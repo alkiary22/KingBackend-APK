@@ -3416,6 +3416,40 @@ async def get_competition_standings(
     return response
 
 
+
+@api_router.get("/competitions/{league_id}/teams")
+async def get_competition_teams(
+    league_id:int,
+    season:int=CURRENT_API_FOOTBALL_SEASON,
+):
+
+    data=await api_football_get(
+        "teams",
+        {
+            "league":league_id,
+            "season":season,
+        }
+    )
+
+    teams=[]
+
+    for item in data.get("response",[]):
+
+        team=item.get("team",{})
+
+        teams.append({
+
+            "id":team.get("id"),
+            "name_en":team.get("name"),
+            "name_ar":team_ar_name(team.get("name")),
+            "logo":team.get("logo"),
+            "country":team.get("country"),
+
+        })
+
+    return teams
+
+
 app.include_router(api_router)
 
 app.add_middleware(
