@@ -118,6 +118,7 @@ def team_ar_name(name):
 # =======================
 API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
+CURRENT_API_FOOTBALL_SEASON = int(os.environ.get("API_FOOTBALL_SEASON", "2024"))
 
 API_FOOTBALL_FINISHED_SHORT = {"FT", "AET", "PEN"}  # final, after extra time, penalties
 API_FOOTBALL_LIVE_SHORT = {"1H", "2H", "HT", "ET", "P", "LIVE", "BT"}
@@ -3301,7 +3302,7 @@ async def get_competitions():
 @api_router.get("/competitions/{league_id}/matches")
 async def get_competition_matches(
     league_id: int,
-    season: int = 2026,
+    season: int = CURRENT_API_FOOTBALL_SEASON,
 ):
 
     data = await api_football_get(
@@ -3325,6 +3326,68 @@ async def get_competition_matches(
     )
 
     return fixtures
+
+
+
+@api_router.get("/competitions/{league_id}/standings")
+async def get_competition_standings(
+    league_id: int,
+    season: int = CURRENT_API_FOOTBALL_SEASON,
+):
+
+    data = await api_football_get(
+        "standings",
+        {
+            "league": league_id,
+            "season": season,
+        },
+    )
+
+    response = []
+
+    for league in data.get("response", []):
+
+        for table in league.get("league", {}).get("standings", []):
+
+            for team in table:
+
+                response.append({
+
+                    "rank": team.get("rank"),
+
+                    "points": team.get("points"),
+
+                    "played": team.get("all", {}).get("played"),
+
+                    "win": team.get("all", {}).get("win"),
+
+                    "draw": team.get("all", {}).get("draw"),
+
+                    "lose": team.get("all", {}).get("lose"),
+
+                    "gf": team.get("all", {}).get("goals", {}).get("for"),
+
+                    "ga": team.get("all", {}).get("goals", {}).get("against"),
+
+                    "gd": team.get("goalsDiff"),
+
+                    "team": {
+
+                        "id": team.get("team", {}).get("id"),
+
+                        "code": af_team_code(team.get("team", {}).get("id")),
+
+                        "name_en": team.get("team", {}).get("name"),
+
+                        "name_ar": team_ar_name(team.get("team", {}).get("name")),
+
+                        "logo": team.get("team", {}).get("logo"),
+
+                    }
+
+                })
+
+    return response
 
 
 app.include_router(api_router)
