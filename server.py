@@ -615,9 +615,30 @@ async def list_matches(date: Optional[str] = None):
 async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
     if data.home_team == data.away_team:
         raise HTTPException(status_code=400, detail="لا يمكن أن يكون الفريقان متطابقين")
+    # السماح بفرق كأس العالم + جميع فرق API-Football
     codes = {t["code"] for t in WORLD_CUP_TEAMS}
-    if data.home_team not in codes or data.away_team not in codes:
-        raise HTTPException(status_code=400, detail="رمز فريق غير صالح")
+
+    extra_teams = await db.football_teams.find(
+        {},
+        {"_id": 0, "code": 1}
+    ).to_list(50000)
+
+    for team in extra_teams:
+        code = team.get("code")
+        if code:
+            codes.add(code)
+
+    if data.home_team not in codes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"رمز الفريق الأول غير صالح: {data.home_team}"
+        )
+
+    if data.away_team not in codes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"رمز الفريق الثاني غير صالح: {data.away_team}"
+        )
     match = {
         "id": str(uuid.uuid4()),
         "home_team": data.home_team,
@@ -1602,6 +1623,23 @@ async def admin_api_football_sync_results(_staff=Depends(require_staff)):
 async def admin_api_football_last_sync(_staff=Depends(require_staff)):
     doc = await db.app_state.find_one({"key": "last_sync_api_football"}, {"_id": 0})
     return doc or {"at": None, "ok": None, "updated": 0, "checked": 0, "created": 0, "skipped": 0}
+
+
+@api_router.delete("/admin/delete-season")
+async def delete_season(
+    season:int,
+    _staff=Depends(require_staff)
+):
+    result = await db.matches.delete_many({
+        "external_provider":"api_football",
+        "season":season,
+        "league_id":{"$ne":1}
+    })
+    return {
+        "ok":True,
+        "deleted":result.deleted_count
+    }
+
 
 
 async def auto_sync_api_football_results_loop():
