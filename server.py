@@ -3267,6 +3267,66 @@ async def admin_recalculate_challenge_scores(_staff=Depends(require_staff)):
 # ===== END TEMP =====
 
 
+
+# ============================================================
+# COMPETITIONS API
+# ============================================================
+
+@api_router.get("/competitions")
+async def get_competitions():
+
+    data = await api_football_get(
+        "leagues",
+        {
+            "current": "true"
+        }
+    )
+
+    leagues = []
+
+    for item in data.get("response", []):
+
+        row = simplify_league_row(item)
+
+        if row.get("type") != "League":
+            continue
+
+        leagues.append(row)
+
+    leagues.sort(key=lambda x: x.get("name_en") or "")
+
+    return leagues
+
+
+@api_router.get("/competitions/{league_id}/matches")
+async def get_competition_matches(
+    league_id: int,
+    season: int = 2026,
+):
+
+    data = await api_football_get(
+        "fixtures",
+        {
+            "league": league_id,
+            "season": season,
+        }
+    )
+
+    fixtures = []
+
+    for item in data.get("response", []):
+
+        fixtures.append(
+            simplify_fixture(item)
+        )
+
+    fixtures.sort(
+        key=lambda x: x.get("timestamp") or 0
+    )
+
+    return fixtures
+
+
 app.include_router(api_router)
 
 app.add_middleware(
