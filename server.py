@@ -3450,6 +3450,24 @@ async def get_competition_teams(
     return teams
 
 
+
+@api_router.get("/competitions/{league_id}/scorers")
+async def get_competition_scorers(
+    league_id:int,
+    season:int=CURRENT_API_FOOTBALL_SEASON,
+):
+
+    data=await api_football_get(
+        "players/topscorers",
+        {
+            "league":league_id,
+            "season":season,
+        }
+    )
+
+    return data.get("response",[])
+
+
 app.include_router(api_router)
 
 app.add_middleware(
