@@ -3283,18 +3283,44 @@ async def get_competitions():
         }
     )
 
+    ALLOWED_LEAGUES = {
+        1,      # FIFA World Cup
+        2,      # UEFA Champions League
+        3,      # UEFA Europa League
+        848,    # UEFA Europa Conference League
+        39,     # Premier League
+        140,    # La Liga
+        135,    # Serie A
+        78,     # Bundesliga
+        61,     # Ligue 1
+        307,    # Saudi Pro League
+    }
+
     leagues = []
 
     for item in data.get("response", []):
 
         row = simplify_league_row(item)
 
-        if row.get("type") != "League":
+        if row.get("id") not in ALLOWED_LEAGUES:
             continue
 
         leagues.append(row)
 
-    leagues.sort(key=lambda x: x.get("name_en") or "")
+    order = {
+        1:0,
+        2:1,
+        39:2,
+        140:3,
+        135:4,
+        78:5,
+        61:6,
+        307:7,
+        3:8,
+        848:9,
+    }
+
+    leagues.sort(key=lambda x: order.get(x["id"],999))
 
     return leagues
 
