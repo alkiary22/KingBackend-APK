@@ -2470,6 +2470,10 @@ class FinalChallengeResultsIn(BaseModel):
     top_scorer: str = Field(min_length=2, max_length=120)
 
 
+class FinalChallengeTamkeenVerifyIn(BaseModel):
+    verified: bool
+
+
 def final_challenge_is_closed():
     return datetime.now(timezone.utc) >= FINAL_CHALLENGE_CLOSE_AT
 
@@ -2609,6 +2613,9 @@ async def save_final_challenge_entry(data: FinalChallengeEntryIn):
                 "best_player": 0,
                 "top_scorer": 0,
             },
+            "tamkeen_verified": False,
+            "tamkeen_verified_at": None,
+            "tamkeen_verified_by": None,
             "created_at": now,
         })
 
@@ -2634,6 +2641,7 @@ async def get_final_challenge_leaderboard():
             "score": 1,
             "score_details": 1,
             "created_at": 1,
+            "tamkeen_verified": 1,
         },
     ).sort([
         ("score", -1),
@@ -2656,6 +2664,8 @@ async def get_final_challenge_leaderboard():
             "name": entry.get("name"),
             "score": score,
             "score_details": entry.get("score_details", {}),
+            "tamkeen_verified": bool(entry.get("tamkeen_verified", False)),
+            "prize_eligible": bool(entry.get("tamkeen_verified", False)),
         })
 
         previous_score = score
@@ -2671,6 +2681,55 @@ async def get_final_challenge_entries(
         {"challenge_id": FINAL_CHALLENGE_ID},
         {"_id": 0},
     ).sort("created_at", 1).to_list(100000)
+
+
+@api_router.post("/admin/final-challenge/entries/{entry_id}/tamkeen-verification")
+async def set_final_challenge_tamkeen_verification(
+    entry_id: str,
+    data: FinalChallengeTamkeenVerifyIn,
+    current_user=Depends(require_staff),
+):
+    entry = await db.final_challenge_entries.find_one(
+        {
+            "id": entry_id,
+            "challenge_id": FINAL_CHALLENGE_ID,
+        },
+        {"_id": 0},
+    )
+
+    if not entry:
+        raise HTTPException(
+            status_code=404,
+            detail="اشتراك التحدي غير موجود",
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    await db.final_challenge_entries.update_one(
+        {
+            "id": entry_id,
+            "challenge_id": FINAL_CHALLENGE_ID,
+        },
+        {
+            "$set": {
+                "tamkeen_verified": data.verified,
+                "tamkeen_verified_at": now if data.verified else None,
+                "tamkeen_verified_by": current_user["id"] if data.verified else None,
+            }
+        },
+    )
+
+    return {
+        "success": True,
+        "entry_id": entry_id,
+        "tamkeen_verified": data.verified,
+        "prize_eligible": data.verified,
+        "message": (
+            "تم تأكيد الاشتراك بمحفظة تمكين"
+            if data.verified
+            else "تم إلغاء تأكيد الاشتراك بمحفظة تمكين"
+        ),
+    }
 
 
 @api_router.post("/admin/final-challenge/results")
