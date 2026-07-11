@@ -2440,6 +2440,292 @@ async def admin_recalculate_challenge_scores(_staff=Depends(require_staff)):
 # ===== END TEMP =====
 
 
+# ===== Final World Cup Challenge API =====
+
+FINAL_CHALLENGE_ID = "worldcup2026_final_awards"
+
+# 14 يوليو 2026 الساعة 22:00 بتوقيت مكة = 19:00 UTC
+FINAL_CHALLENGE_CLOSE_AT = datetime(
+    2026, 7, 14, 19, 0, 0, tzinfo=timezone.utc
+)
+
+FINAL_CHALLENGE_POINTS = {
+    "champion": 10,
+    "best_player": 5,
+    "top_scorer": 5,
+}
+
+
+class FinalChallengeEntryIn(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    phone: str = Field(min_length=7, max_length=20)
+    champion: str = Field(min_length=2, max_length=100)
+    best_player: str = Field(min_length=2, max_length=120)
+    top_scorer: str = Field(min_length=2, max_length=120)
+
+
+class FinalChallengeResultsIn(BaseModel):
+    champion: str = Field(min_length=2, max_length=100)
+    best_player: str = Field(min_length=2, max_length=120)
+    top_scorer: str = Field(min_length=2, max_length=120)
+
+
+def final_challenge_is_closed():
+    return datetime.now(timezone.utc) >= FINAL_CHALLENGE_CLOSE_AT
+
+
+def normalize_final_challenge_phone(value):
+    value = str(value or "").strip()
+    return "".join(ch for ch in value if ch.isdigit())
+
+
+def normalize_final_challenge_answer(value):
+    return " ".join(str(value or "").strip().casefold().split())
+
+
+def calculate_final_challenge_score(entry, results):
+    score = 0
+
+    details = {
+        "champion": 0,
+        "best_player": 0,
+        "top_scorer": 0,
+    }
+
+    for key, points in FINAL_CHALLENGE_POINTS.items():
+        predicted = normalize_final_challenge_answer(entry.get(key))
+        correct = normalize_final_challenge_answer(results.get(key))
+
+        if predicted and correct and predicted == correct:
+            score += points
+            details[key] = points
+
+    return score, details
+
+
+async def recalculate_final_challenge_scores():
+    results_doc = await db.final_challenge_results.find_one(
+        {"challenge_id": FINAL_CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    if not results_doc:
+        return 0
+
+    results = results_doc.get("results", {})
+
+    entries = await db.final_challenge_entries.find(
+        {"challenge_id": FINAL_CHALLENGE_ID},
+        {"_id": 0},
+    ).to_list(100000)
+
+    now = datetime.now(timezone.utc).isoformat()
+    updated = 0
+
+    for entry in entries:
+        score, details = calculate_final_challenge_score(entry, results)
+
+        await db.final_challenge_entries.update_one(
+            {"id": entry["id"]},
+            {
+                "$set": {
+                    "score": score,
+                    "score_details": details,
+                    "score_updated_at": now,
+                }
+            },
+        )
+
+        updated += 1
+
+    return updated
+
+
+@api_router.get("/final-challenge/status")
+async def get_final_challenge_status():
+    return {
+        "challenge_id": FINAL_CHALLENGE_ID,
+        "closed": final_challenge_is_closed(),
+        "close_at": FINAL_CHALLENGE_CLOSE_AT.isoformat(),
+        "close_at_makkah": "2026-07-14T22:00:00+03:00",
+        "points": FINAL_CHALLENGE_POINTS,
+        "max_points": 20,
+    }
+
+
+@api_router.post("/final-challenge/entry")
+async def save_final_challenge_entry(data: FinalChallengeEntryIn):
+    if final_challenge_is_closed():
+        raise HTTPException(
+            status_code=403,
+            detail="تم إغلاق توقعات تحدي كأس العالم",
+        )
+
+    phone = normalize_final_challenge_phone(data.phone)
+
+    if len(phone) < 7:
+        raise HTTPException(
+            status_code=400,
+            detail="رقم الجوال غير صالح",
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    existing = await db.final_challenge_entries.find_one(
+        {
+            "challenge_id": FINAL_CHALLENGE_ID,
+            "phone_normalized": phone,
+        },
+        {"_id": 0},
+    )
+
+    doc = {
+        "challenge_id": FINAL_CHALLENGE_ID,
+        "name": data.name.strip(),
+        "phone": data.phone.strip(),
+        "phone_normalized": phone,
+        "champion": data.champion.strip(),
+        "best_player": data.best_player.strip(),
+        "top_scorer": data.top_scorer.strip(),
+        "updated_at": now,
+    }
+
+    if existing:
+        await db.final_challenge_entries.update_one(
+            {"id": existing["id"]},
+            {"$set": doc},
+        )
+
+        entry_id = existing["id"]
+        message = "تم تحديث توقعاتك بنجاح"
+    else:
+        entry_id = str(uuid.uuid4())
+
+        doc.update({
+            "id": entry_id,
+            "score": 0,
+            "score_details": {
+                "champion": 0,
+                "best_player": 0,
+                "top_scorer": 0,
+            },
+            "created_at": now,
+        })
+
+        await db.final_challenge_entries.insert_one(doc)
+
+        message = "تم تثبيت توقعاتك بنجاح"
+
+    return {
+        "success": True,
+        "message": message,
+        "entry_id": entry_id,
+    }
+
+
+@api_router.get("/final-challenge/leaderboard")
+async def get_final_challenge_leaderboard():
+    entries = await db.final_challenge_entries.find(
+        {"challenge_id": FINAL_CHALLENGE_ID},
+        {
+            "_id": 0,
+            "id": 1,
+            "name": 1,
+            "score": 1,
+            "score_details": 1,
+            "created_at": 1,
+        },
+    ).sort([
+        ("score", -1),
+        ("created_at", 1),
+    ]).to_list(10000)
+
+    leaderboard = []
+    previous_score = None
+    current_rank = 0
+
+    for index, entry in enumerate(entries, start=1):
+        score = int(entry.get("score", 0) or 0)
+
+        if previous_score is None or score != previous_score:
+            current_rank = index
+
+        leaderboard.append({
+            "rank": current_rank,
+            "id": entry.get("id"),
+            "name": entry.get("name"),
+            "score": score,
+            "score_details": entry.get("score_details", {}),
+        })
+
+        previous_score = score
+
+    return leaderboard
+
+
+@api_router.get("/admin/final-challenge/entries")
+async def get_final_challenge_entries(
+    current_user=Depends(require_staff)
+):
+    return await db.final_challenge_entries.find(
+        {"challenge_id": FINAL_CHALLENGE_ID},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(100000)
+
+
+@api_router.post("/admin/final-challenge/results")
+async def set_final_challenge_results(
+    data: FinalChallengeResultsIn,
+    current_user=Depends(require_admin),
+):
+    now = datetime.now(timezone.utc).isoformat()
+
+    results = {
+        "champion": data.champion.strip(),
+        "best_player": data.best_player.strip(),
+        "top_scorer": data.top_scorer.strip(),
+    }
+
+    await db.final_challenge_results.update_one(
+        {"challenge_id": FINAL_CHALLENGE_ID},
+        {
+            "$set": {
+                "challenge_id": FINAL_CHALLENGE_ID,
+                "results": results,
+                "updated_at": now,
+                "updated_by": current_user["id"],
+            }
+        },
+        upsert=True,
+    )
+
+    updated = await recalculate_final_challenge_scores()
+
+    return {
+        "success": True,
+        "message": "تم حفظ النتائج واحتساب نقاط التحدي",
+        "updated_entries": updated,
+        "results": results,
+    }
+
+
+@api_router.get("/admin/final-challenge/results")
+async def get_final_challenge_results(
+    current_user=Depends(require_staff)
+):
+    doc = await db.final_challenge_results.find_one(
+        {"challenge_id": FINAL_CHALLENGE_ID},
+        {"_id": 0},
+    )
+
+    return doc or {
+        "challenge_id": FINAL_CHALLENGE_ID,
+        "results": {},
+    }
+
+
+# ===== End Final World Cup Challenge API =====
+
 app.include_router(api_router)
 
 app.add_middleware(
