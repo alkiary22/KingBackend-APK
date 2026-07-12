@@ -3527,41 +3527,348 @@ async def get_competitions():
     return leagues
 
 
-@api_router.get("/competitions/{league_id}/matches")
-async def get_competition_matches(
+async def save_competition_dataset(
+    league_id: int,
+    season: int,
+    kind: str,
+    items: list,
+):
+    now = datetime.now(timezone.utc).isoformat()
+
+    await db.competition_data.update_one(
+        {
+            "_id": f"{kind}:{league_id}:{season}"
+        },
+        {
+            "$set": {
+                "league_id": league_id,
+                "season": season,
+                "kind": kind,
+                "items": items,
+                "updated_at": now,
+            }
+        },
+        upsert=True,
+    )
+
+
+async def load_competition_dataset(
+    league_id: int,
+    season: int,
+    kind: str,
+):
+    doc = await db.competition_data.find_one(
+        {
+            "_id": f"{kind}:{league_id}:{season}"
+        },
+        {
+            "_id": 0,
+            "items": 1,
+        },
+    )
+
+    if not doc:
+        return []
+
+    return doc.get("items") or []
+
+
+async def sync_competition_dataset(
+    league_id: int,
+    season: int,
+):
+    result = {
+        "league_id": league_id,
+        "season": season,
+        "matches": 0,
+        "standings": 0,
+        "teams": 0,
+        "scorers": 0,
+        "skipped": [],
+        "errors": {},
+    }
+
+    existing = {}
+
+    cursor = db.competition_data.find(
+        {
+            "league_id": league_id,
+            "season": season,
+        },
+        {
+            "_id": 0,
+            "kind": 1,
+            "items": 1,
+        },
+    )
+
+    async for doc in cursor:
+        kind = doc.get("kind")
+        items = doc.get("items") or []
+
+        if kind and items:
+            existing[kind] = items
+
+    # =========================
+    # MATCHES
+    # =========================
+    if "matches" in existing:
+
+        result["matches"] = len(
+            existing["matches"]
+        )
+
+        result["skipped"].append("matches")
+
+    else:
+
+        try:
+
+            data = await cached_api_football_get(
+                "fixtures",
+                {
+                    "league": league_id,
+                    "season": season,
+                },
+                ttl_seconds=900,
+            )
+
+            fixtures = [
+                simplify_fixture(item)
+                for item in data.get("response", [])
+            ]
+
+            fixtures.sort(
+                key=lambda x: x.get("timestamp") or 0
+            )
+
+            await save_competition_dataset(
+                league_id,
+                season,
+                "matches",
+                fixtures,
+            )
+
+            result["matches"] = len(fixtures)
+
+        except Exception as e:
+
+            result["errors"]["matches"] = str(e)
+
+    # =========================
+    # STANDINGS
+    # =========================
+    if "standings" in existing:
+
+        result["standings"] = len(
+            existing["standings"]
+        )
+
+        result["skipped"].append("standings")
+
+    else:
+
+        try:
+
+            data = await cached_api_football_get(
+                "standings",
+                {
+                    "league": league_id,
+                    "season": season,
+                },
+                ttl_seconds=1800,
+            )
+
+            standings = []
+
+            for league in data.get("response", []):
+
+                tables = (
+                    league.get("league", {})
+                    .get("standings", [])
+                )
+
+                for table in tables:
+
+                    for team in table:
+
+                        team_data = (
+                            team.get("team", {})
+                        )
+
+                        all_data = (
+                            team.get("all", {})
+                        )
+
+                        goals = (
+                            all_data.get("goals", {})
+                        )
+
+                        standings.append({
+                            "rank": team.get("rank"),
+                            "points": team.get("points"),
+                            "played": all_data.get("played"),
+                            "win": all_data.get("win"),
+                            "draw": all_data.get("draw"),
+                            "lose": all_data.get("lose"),
+                            "gf": goals.get("for"),
+                            "ga": goals.get("against"),
+                            "gd": team.get("goalsDiff"),
+                            "team": {
+                                "id": team_data.get("id"),
+                                "code": af_team_code(
+                                    team_data.get("id")
+                                ),
+                                "name_en": team_data.get("name"),
+                                "name_ar": team_ar_name(
+                                    team_data.get("name")
+                                ),
+                                "logo": team_data.get("logo"),
+                            },
+                        })
+
+            await save_competition_dataset(
+                league_id,
+                season,
+                "standings",
+                standings,
+            )
+
+            result["standings"] = len(standings)
+
+        except Exception as e:
+
+            result["errors"]["standings"] = str(e)
+
+    # =========================
+    # TEAMS
+    # =========================
+    if "teams" in existing:
+
+        result["teams"] = len(
+            existing["teams"]
+        )
+
+        result["skipped"].append("teams")
+
+    else:
+
+        try:
+
+            data = await cached_api_football_get(
+                "teams",
+                {
+                    "league": league_id,
+                    "season": season,
+                },
+                ttl_seconds=86400,
+            )
+
+            teams = []
+
+            for item in data.get("response", []):
+
+                team = item.get("team", {})
+
+                teams.append({
+                    "id": team.get("id"),
+                    "name_en": team.get("name"),
+                    "name_ar": team_ar_name(
+                        team.get("name")
+                    ),
+                    "logo": team.get("logo"),
+                    "country": team.get("country"),
+                })
+
+            await save_competition_dataset(
+                league_id,
+                season,
+                "teams",
+                teams,
+            )
+
+            result["teams"] = len(teams)
+
+        except Exception as e:
+
+            result["errors"]["teams"] = str(e)
+
+    # =========================
+    # SCORERS
+    # =========================
+    if "scorers" in existing:
+
+        result["scorers"] = len(
+            existing["scorers"]
+        )
+
+        result["skipped"].append("scorers")
+
+    else:
+
+        try:
+
+            data = await cached_api_football_get(
+                "players/topscorers",
+                {
+                    "league": league_id,
+                    "season": season,
+                },
+                ttl_seconds=3600,
+            )
+
+            scorers = (
+                data.get("response", []) or []
+            )
+
+            await save_competition_dataset(
+                league_id,
+                season,
+                "scorers",
+                scorers,
+            )
+
+            result["scorers"] = len(scorers)
+
+        except Exception as e:
+
+            result["errors"]["scorers"] = str(e)
+
+    return result
+
+
+@api_router.post("/admin/competitions/{league_id}/sync")
+async def sync_competition(
     league_id: int,
     season: Optional[int] = None,
+    _staff=Depends(require_staff),
 ):
-
     season = await resolve_competition_season(
         league_id,
         season,
     )
 
-
-    data = await cached_api_football_get(
-        "fixtures",
-        {
-            "league": league_id,
-            "season": season,
-        },
-        ttl_seconds=900,
+    return await sync_competition_dataset(
+        league_id,
+        season,
     )
 
-    fixtures = []
 
-    for item in data.get("response", []):
-
-        fixtures.append(
-            simplify_fixture(item)
-        )
-
-    fixtures.sort(
-        key=lambda x: x.get("timestamp") or 0
+@api_router.get("/competitions/{league_id}/matches")
+async def get_competition_matches(
+    league_id: int,
+    season: Optional[int] = None,
+):
+    season = await resolve_competition_season(
+        league_id,
+        season,
     )
 
-    return fixtures
-
+    return await load_competition_dataset(
+        league_id,
+        season,
+        "matches",
+    )
 
 
 @api_router.get("/competitions/{league_id}/standings")
@@ -3569,134 +3876,50 @@ async def get_competition_standings(
     league_id: int,
     season: Optional[int] = None,
 ):
-
     season = await resolve_competition_season(
         league_id,
         season,
     )
 
-
-    data = await cached_api_football_get(
+    return await load_competition_dataset(
+        league_id,
+        season,
         "standings",
-        {
-            "league": league_id,
-            "season": season,
-        },
-        ttl_seconds=1800,
     )
-
-    response = []
-
-    for league in data.get("response", []):
-
-        for table in league.get("league", {}).get("standings", []):
-
-            for team in table:
-
-                response.append({
-
-                    "rank": team.get("rank"),
-
-                    "points": team.get("points"),
-
-                    "played": team.get("all", {}).get("played"),
-
-                    "win": team.get("all", {}).get("win"),
-
-                    "draw": team.get("all", {}).get("draw"),
-
-                    "lose": team.get("all", {}).get("lose"),
-
-                    "gf": team.get("all", {}).get("goals", {}).get("for"),
-
-                    "ga": team.get("all", {}).get("goals", {}).get("against"),
-
-                    "gd": team.get("goalsDiff"),
-
-                    "team": {
-
-                        "id": team.get("team", {}).get("id"),
-
-                        "code": af_team_code(team.get("team", {}).get("id")),
-
-                        "name_en": team.get("team", {}).get("name"),
-
-                        "name_ar": team_ar_name(team.get("team", {}).get("name")),
-
-                        "logo": team.get("team", {}).get("logo"),
-
-                    }
-
-                })
-
-    return response
-
 
 
 @api_router.get("/competitions/{league_id}/teams")
 async def get_competition_teams(
-    league_id:int,
+    league_id: int,
     season: Optional[int] = None,
 ):
-
     season = await resolve_competition_season(
         league_id,
         season,
     )
 
-
-    data=await cached_api_football_get(
+    return await load_competition_dataset(
+        league_id,
+        season,
         "teams",
-        {
-            "league":league_id,
-            "season":season,
-        },
-        ttl_seconds=86400,
     )
-
-    teams=[]
-
-    for item in data.get("response",[]):
-
-        team=item.get("team",{})
-
-        teams.append({
-
-            "id":team.get("id"),
-            "name_en":team.get("name"),
-            "name_ar":team_ar_name(team.get("name")),
-            "logo":team.get("logo"),
-            "country":team.get("country"),
-
-        })
-
-    return teams
-
 
 
 @api_router.get("/competitions/{league_id}/scorers")
 async def get_competition_scorers(
-    league_id:int,
+    league_id: int,
     season: Optional[int] = None,
 ):
-
     season = await resolve_competition_season(
         league_id,
         season,
     )
 
-
-    data=await cached_api_football_get(
-        "players/topscorers",
-        {
-            "league":league_id,
-            "season":season,
-        },
-        ttl_seconds=3600,
+    return await load_competition_dataset(
+        league_id,
+        season,
+        "scorers",
     )
-
-    return data.get("response",[])
-
 
 
 # ===== Final World Cup Challenge API =====
