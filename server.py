@@ -235,7 +235,11 @@ MECCA_TZ = timezone(timedelta(hours=3))
 
 API_CACHE_TTL_SECONDS = 1800  # 30 minutes
 
-async def cached_api_football_get(path:str, params:dict|None=None):
+async def cached_api_football_get(
+    path: str,
+    params: dict | None = None,
+    ttl_seconds: int = API_CACHE_TTL_SECONDS,
+):
 
     params=params or {}
 
@@ -258,24 +262,40 @@ async def cached_api_football_get(path:str, params:dict|None=None):
 
         age=(now-updated).total_seconds()
 
-        if age<API_CACHE_TTL_SECONDS:
+        if age < ttl_seconds:
 
             return cached["data"]
 
-    data=await cached_api_football_get(path,params)
+    try:
 
-    await db.competition_cache.update_one(
-        {"_id":key},
-        {
-            "$set":{
-                "data":data,
-                "updated_at":now.isoformat()
-            }
-        },
-        upsert=True
-    )
+        data = await api_football_get(path, params)
 
-    return data
+        await db.competition_cache.update_one(
+            {"_id": key},
+            {
+                "$set": {
+                    "data": data,
+                    "updated_at": now.isoformat()
+                }
+            },
+            upsert=True
+        )
+
+        return data
+
+    except HTTPException as e:
+
+        if cached and "data" in cached:
+
+            logger.warning(
+                "API-Football unavailable for %s. Returning stale cache. Error: %s",
+                path,
+                e.detail
+            )
+
+            return cached["data"]
+
+        raise
 
 
 async def upsert_api_football_team(team: dict):
@@ -1313,7 +1333,7 @@ async def admin_api_football_import_fixtures(data: AFImportFixturesIn, _staff=De
     if data.to_date:
         params["to"] = data.to_date
 
-    payload = await cached_api_football_get("/fixtures", params)
+    payload = await api_football_get("/fixtures", params)
     fixtures = payload.get("response") or []
 
     created = 0
@@ -1634,7 +1654,7 @@ async def admin_api_football_sync_results(_staff=Depends(require_staff)):
 
         checked += 1
         try:
-            payload = await cached_api_football_get("/fixtures", {"id": int(fid)})
+            payload = await api_football_get("/fixtures", {"id": int(fid)})
             resp = payload.get("response") or []
             if not resp:
                 continue
@@ -1744,7 +1764,15 @@ async def football_fixtures(
     if status_short:
         params["status"] = status_short
 
-    payload = await cached_api_football_get("/fixtures", params)
+    if live:
+        payload = await api_football_get("/fixtures", params)
+    else:
+        payload = await cached_api_football_get(
+            "/fixtures",
+            params,
+            ttl_seconds=900,
+        )
+
     resp = payload.get("response") or []
     items = [simplify_fixture(x) for x in resp]
     return {"count": len(items), "items": items}
@@ -1774,7 +1802,11 @@ async def football_live():
 async def football_finished(date: Optional[str] = None):
     d = date or datetime.now(timezone.utc).date().isoformat()
     # status=FT returns finished, but some competitions use AET/PEN; for broad we fetch date and filter here
-    payload = await cached_api_football_get("/fixtures", {"date": d})
+    payload = await cached_api_football_get(
+        "/fixtures",
+        {"date": d},
+        ttl_seconds=60,
+    )
     resp = payload.get("response") or []
     items = []
     for x in resp:
@@ -3320,6 +3352,54 @@ async def admin_recalculate_challenge_scores(_staff=Depends(require_staff)):
 # COMPETITIONS API
 # ============================================================
 
+async def resolve_competition_season(
+    league_id: int,
+    requested_season: int | None = None,
+) -> int:
+
+    if requested_season is not None:
+        return int(requested_season)
+
+    try:
+        data = await cached_api_football_get(
+            "leagues",
+            {"id": league_id},
+            ttl_seconds=86400,
+        )
+
+        response = data.get("response") or []
+
+        if response:
+            seasons = response[0].get("seasons") or []
+
+            years = sorted(
+                {
+                    int(item["year"])
+                    for item in seasons
+                    if item.get("year") is not None
+                },
+                reverse=True,
+            )
+
+            # نختار أحدث موسم تسمح به الخطة الحالية
+            allowed_years = [
+                year
+                for year in years
+                if year <= CURRENT_API_FOOTBALL_SEASON
+            ]
+
+            if allowed_years:
+                return allowed_years[0]
+
+    except Exception as e:
+        logger.warning(
+            "Could not resolve season for league %s: %s",
+            league_id,
+            e,
+        )
+
+    return CURRENT_API_FOOTBALL_SEASON
+
 @api_router.get("/competitions")
 async def get_competitions():
 
@@ -3375,15 +3455,22 @@ async def get_competitions():
 @api_router.get("/competitions/{league_id}/matches")
 async def get_competition_matches(
     league_id: int,
-    season: int = CURRENT_API_FOOTBALL_SEASON,
+    season: Optional[int] = None,
 ):
+
+    season = await resolve_competition_season(
+        league_id,
+        season,
+    )
+
 
     data = await cached_api_football_get(
         "fixtures",
         {
             "league": league_id,
             "season": season,
-        }
+        },
+        ttl_seconds=900,
     )
 
     fixtures = []
@@ -3405,8 +3492,14 @@ async def get_competition_matches(
 @api_router.get("/competitions/{league_id}/standings")
 async def get_competition_standings(
     league_id: int,
-    season: int = CURRENT_API_FOOTBALL_SEASON,
+    season: Optional[int] = None,
 ):
+
+    season = await resolve_competition_season(
+        league_id,
+        season,
+    )
+
 
     data = await cached_api_football_get(
         "standings",
@@ -3414,6 +3507,7 @@ async def get_competition_standings(
             "league": league_id,
             "season": season,
         },
+        ttl_seconds=1800,
     )
 
     response = []
@@ -3467,15 +3561,22 @@ async def get_competition_standings(
 @api_router.get("/competitions/{league_id}/teams")
 async def get_competition_teams(
     league_id:int,
-    season:int=CURRENT_API_FOOTBALL_SEASON,
+    season: Optional[int] = None,
 ):
+
+    season = await resolve_competition_season(
+        league_id,
+        season,
+    )
+
 
     data=await cached_api_football_get(
         "teams",
         {
             "league":league_id,
             "season":season,
-        }
+        },
+        ttl_seconds=86400,
     )
 
     teams=[]
@@ -3501,15 +3602,22 @@ async def get_competition_teams(
 @api_router.get("/competitions/{league_id}/scorers")
 async def get_competition_scorers(
     league_id:int,
-    season:int=CURRENT_API_FOOTBALL_SEASON,
+    season: Optional[int] = None,
 ):
+
+    season = await resolve_competition_season(
+        league_id,
+        season,
+    )
+
 
     data=await cached_api_football_get(
         "players/topscorers",
         {
             "league":league_id,
             "season":season,
-        }
+        },
+        ttl_seconds=3600,
     )
 
     return data.get("response",[])
