@@ -2841,6 +2841,38 @@ async def set_final_challenge_results(
     }
 
 
+@api_router.delete("/admin/final-challenge/results/reset")
+async def reset_final_challenge_results(
+    current_user=Depends(require_admin),
+):
+    now = datetime.now(timezone.utc).isoformat()
+
+    await db.final_challenge_results.delete_many(
+        {"challenge_id": FINAL_CHALLENGE_ID}
+    )
+
+    result = await db.final_challenge_entries.update_many(
+        {"challenge_id": FINAL_CHALLENGE_ID},
+        {
+            "$set": {
+                "score": 0,
+                "score_details": {
+                    "champion": 0,
+                    "best_player": 0,
+                    "top_scorer": 0,
+                },
+                "score_updated_at": now,
+            }
+        },
+    )
+
+    return {
+        "success": True,
+        "message": "تم تصفير نتائج ونقاط التحدي بنجاح",
+        "reset_entries": result.modified_count,
+    }
+
+
 @api_router.get("/admin/final-challenge/results")
 async def get_final_challenge_results(
     current_user=Depends(require_staff)
