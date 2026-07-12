@@ -2447,9 +2447,9 @@ async def admin_recalculate_challenge_scores(_staff=Depends(require_staff)):
 
 FINAL_CHALLENGE_ID = "worldcup2026_final_awards"
 
-# 14 يوليو 2026 الساعة 22:00 بتوقيت مكة = 19:00 UTC
+# 19 يوليو 2026 الساعة 22:00 بتوقيت مكة = 19:00 UTC
 FINAL_CHALLENGE_CLOSE_AT = datetime(
-    2026, 7, 14, 19, 0, 0, tzinfo=timezone.utc
+    2026, 7, 19, 19, 0, 0, tzinfo=timezone.utc
 )
 
 FINAL_CHALLENGE_POINTS = {
@@ -2622,7 +2622,7 @@ async def get_final_challenge_status():
         "challenge_id": FINAL_CHALLENGE_ID,
         "closed": final_challenge_is_closed(),
         "close_at": FINAL_CHALLENGE_CLOSE_AT.isoformat(),
-        "close_at_makkah": "2026-07-14T22:00:00+03:00",
+        "close_at_makkah": "2026-07-19T22:00:00+03:00",
         "points": FINAL_CHALLENGE_POINTS,
         "max_points": 20,
     }
