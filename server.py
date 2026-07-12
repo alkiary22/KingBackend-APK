@@ -235,67 +235,133 @@ MECCA_TZ = timezone(timedelta(hours=3))
 
 API_CACHE_TTL_SECONDS = 1800  # 30 minutes
 
+# حماية API-Football من الطلبات المتزامنة والمتكررة
+_api_cache_locks = {}
+_api_football_blocked_until = None
+API_FOOTBALL_BLOCK_SECONDS = 21600  # 6 ساعات
+
+
 async def cached_api_football_get(
     path: str,
     params: dict | None = None,
     ttl_seconds: int = API_CACHE_TTL_SECONDS,
 ):
+    global _api_football_blocked_until
 
-    params=params or {}
+    params = params or {}
 
-    key=hashlib.sha1(
-        (path+"|"+json.dumps(params,sort_keys=True)).encode()
+    key = hashlib.sha1(
+        (
+            path + "|" +
+            json.dumps(params, sort_keys=True)
+        ).encode()
     ).hexdigest()
 
-    now=datetime.now(timezone.utc)
-
-    cached=await db.competition_cache.find_one(
-        {"_id":key},
-        {"_id":0}
+    lock = _api_cache_locks.setdefault(
+        key,
+        asyncio.Lock()
     )
 
-    if cached:
+    async with lock:
 
-        updated=datetime.fromisoformat(
-            cached["updated_at"]
-        )
+        now = datetime.now(timezone.utc)
 
-        age=(now-updated).total_seconds()
-
-        if age < ttl_seconds:
-
-            return cached["data"]
-
-    try:
-
-        data = await api_football_get(path, params)
-
-        await db.competition_cache.update_one(
+        cached = await db.competition_cache.find_one(
             {"_id": key},
-            {
-                "$set": {
-                    "data": data,
-                    "updated_at": now.isoformat()
-                }
-            },
-            upsert=True
+            {"_id": 0}
         )
 
-        return data
+        if cached and cached.get("data") is not None:
 
-    except HTTPException as e:
+            try:
+                updated = datetime.fromisoformat(
+                    cached["updated_at"]
+                )
 
-        if cached and "data" in cached:
+                age = (
+                    now - updated
+                ).total_seconds()
 
-            logger.warning(
-                "API-Football unavailable for %s. Returning stale cache. Error: %s",
-                path,
-                e.detail
+                if age < ttl_seconds:
+                    return cached["data"]
+
+            except Exception:
+                pass
+
+        # إذا API أوقف الحساب مؤقتًا لا نكرر ضربه
+        if (
+            _api_football_blocked_until
+            and now < _api_football_blocked_until
+        ):
+
+            if cached and cached.get("data") is not None:
+
+                logger.warning(
+                    "API-Football blocked. Returning stale cache for %s",
+                    path
+                )
+
+                return cached["data"]
+
+            raise HTTPException(
+                status_code=503,
+                detail="بيانات البطولة غير متاحة مؤقتًا"
             )
 
-            return cached["data"]
+        try:
 
-        raise
+            data = await api_football_get(
+                path,
+                params
+            )
+
+            await db.competition_cache.update_one(
+                {"_id": key},
+                {
+                    "$set": {
+                        "data": data,
+                        "updated_at": now.isoformat()
+                    }
+                },
+                upsert=True
+            )
+
+            return data
+
+        except HTTPException as e:
+
+            error_text = str(e.detail).lower()
+
+            if (
+                "suspended" in error_text
+                or "ratelimit" in error_text
+                or "too many requests" in error_text
+                or "daily request limit" in error_text
+            ):
+
+                _api_football_blocked_until = (
+                    now + timedelta(
+                        seconds=API_FOOTBALL_BLOCK_SECONDS
+                    )
+                )
+
+                logger.error(
+                    "API-Football temporarily blocked until %s: %s",
+                    _api_football_blocked_until.isoformat(),
+                    e.detail
+                )
+
+            if cached and cached.get("data") is not None:
+
+                logger.warning(
+                    "API-Football unavailable for %s. Returning stale cache. Error: %s",
+                    path,
+                    e.detail
+                )
+
+                return cached["data"]
+
+            raise
 
 
 async def upsert_api_football_team(team: dict):
@@ -3431,6 +3497,15 @@ async def get_competitions():
 
         if row.get("id") not in ALLOWED_LEAGUES:
             continue
+
+        # نفس الموسم الفعلي المستخدم في المباريات والترتيب والفرق والهدافين
+        effective_season = await resolve_competition_season(
+            int(row["id"])
+        )
+
+        row["api_current_season"] = row.get("current_season")
+        row["current_season"] = effective_season
+        row["effective_season"] = effective_season
 
         leagues.append(row)
 
