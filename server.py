@@ -2590,7 +2590,15 @@ async def recalculate_final_challenge_scores():
     updated = 0
 
     for entry in entries:
-        score, details = calculate_final_challenge_score(entry, results)
+        if entry.get("tamkeen_verified", False):
+            score, details = calculate_final_challenge_score(entry, results)
+        else:
+            score = 0
+            details = {
+                "champion": 0,
+                "best_player": 0,
+                "top_scorer": 0,
+            }
 
         await db.final_challenge_entries.update_one(
             {"id": entry["id"]},
@@ -2781,6 +2789,8 @@ async def set_final_challenge_tamkeen_verification(
             }
         },
     )
+
+    await recalculate_final_challenge_scores()
 
     return {
         "success": True,
