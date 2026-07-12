@@ -24,6 +24,9 @@ from sportsdb import fetch_world_cup_events, normalize_team_code, parse_score, F
 from content_defaults import DEFAULT_CONTENT
 import asyncio
 import httpx
+import re
+import unicodedata
+from difflib import SequenceMatcher
 
 # Firebase Cloud Messaging
 try:
@@ -2484,7 +2487,60 @@ def normalize_final_challenge_phone(value):
 
 
 def normalize_final_challenge_answer(value):
-    return " ".join(str(value or "").strip().casefold().split())
+    value = str(value or "").strip().casefold()
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+
+    arabic_map = str.maketrans({
+        "أ": "ا",
+        "إ": "ا",
+        "آ": "ا",
+        "ٱ": "ا",
+        "ى": "ي",
+        "ؤ": "و",
+        "ئ": "ي",
+        "ة": "ه",
+        "ـ": "",
+    })
+
+    value = value.translate(arabic_map)
+    value = re.sub(r"[^0-9a-zA-Z\u0600-\u06FF ]+", " ", value)
+
+    return " ".join(value.split())
+
+
+def final_challenge_player_name_matches(predicted_value, correct_value):
+    predicted = normalize_final_challenge_answer(predicted_value)
+    correct = normalize_final_challenge_answer(correct_value)
+
+    if not predicted or not correct:
+        return False
+
+    if predicted == correct:
+        return True
+
+    predicted_words = [word for word in predicted.split() if len(word) >= 4]
+    correct_words = [word for word in correct.split() if len(word) >= 4]
+
+    candidates_predicted = [predicted] + predicted_words
+    candidates_correct = [correct] + correct_words
+
+    for predicted_name in candidates_predicted:
+        for correct_name in candidates_correct:
+            if predicted_name == correct_name:
+                return True
+
+            if min(len(predicted_name), len(correct_name)) >= 4:
+                similarity = SequenceMatcher(
+                    None,
+                    predicted_name,
+                    correct_name,
+                ).ratio()
+
+                if similarity >= 0.72:
+                    return True
+
+    return False
 
 
 def calculate_final_challenge_score(entry, results):
@@ -2497,10 +2553,17 @@ def calculate_final_challenge_score(entry, results):
     }
 
     for key, points in FINAL_CHALLENGE_POINTS.items():
-        predicted = normalize_final_challenge_answer(entry.get(key))
-        correct = normalize_final_challenge_answer(results.get(key))
+        if key in ("best_player", "top_scorer"):
+            matched = final_challenge_player_name_matches(
+                entry.get(key),
+                results.get(key),
+            )
+        else:
+            predicted = normalize_final_challenge_answer(entry.get(key))
+            correct = normalize_final_challenge_answer(results.get(key))
+            matched = bool(predicted and correct and predicted == correct)
 
-        if predicted and correct and predicted == correct:
+        if matched:
             score += points
             details[key] = points
 
