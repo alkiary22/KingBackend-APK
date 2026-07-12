@@ -107,6 +107,236 @@ TEAM_AR_NAMES = {
     "South Korea": "كوريا الجنوبية",
     "USA": "الولايات المتحدة",
     "United States": "الولايات المتحدة",
+    'Al Khaleej Saihat': 'الخليج',
+
+    'Al Kholood': 'الخلود',
+
+    'Al Okhdood': 'الأخدود',
+
+    'Al Orubah': 'العروبة',
+
+    'Al Riyadh': 'الرياض',
+
+    'Al Shabab': 'الشباب',
+
+    'Al Taawon': 'التعاون',
+
+    'Al Wehda Club': 'الوحدة',
+
+    'Al-Ettifaq': 'الاتفاق',
+
+    'Al-Fateh': 'الفتح',
+
+    'Al-Fayha': 'الفيحاء',
+
+    'Al-Ittihad FC': 'الاتحاد',
+
+    'Al-Qadisiyah FC': 'القادسية',
+
+    'Al-Raed': 'الرائد',
+
+    'Alaves': 'ألافيس',
+
+    'Apoel Nicosia': 'أبويل نيقوسيا',
+
+    'Athletic Club': 'أتلتيك بلباو',
+
+    'Australia': 'أستراليا',
+
+    'BSC Young Boys': 'يونغ بويز',
+
+    'Ballkani': 'بالكاني',
+
+    'Bayern München': 'بايرن ميونخ',
+
+    'Belgium': 'بلجيكا',
+
+    'Bodo/Glimt': 'بودو غليمت',
+
+    'Bologna': 'بولونيا',
+
+    'Borac Banja Luka': 'بوراك بانيا لوكا',
+
+    'Bournemouth': 'بورنموث',
+
+    'Brentford': 'برينتفورد',
+
+    'Brighton': 'برايتون',
+
+    'Cameroon': 'الكاميرون',
+
+    'Canada': 'كندا',
+
+    'Celje': 'تسيليه',
+
+    'Celta Vigo': 'سيلتا فيغو',
+
+    'Club Brugge KV': 'كلوب بروج',
+
+    'Costa Rica': 'كوستاريكا',
+
+    'Croatia': 'كرواتيا',
+
+    'Crystal Palace': 'كريستال بالاس',
+
+    'Damac': 'ضمك',
+
+    'Denmark': 'الدنمارك',
+
+    'Dečić': 'ديتشيتش',
+
+    'Dinamo Batumi': 'دينامو باتومي',
+
+    'Dinamo Minsk': 'دينامو مينسك',
+
+    'Dinamo Zagreb': 'دينامو زغرب',
+
+    'Dynamo Kyiv': 'دينامو كييف',
+
+    'Ecuador': 'الإكوادور',
+
+    'Egnatia Rrogozhinë': 'إغناتيا',
+
+    'Espanyol': 'إسبانيول',
+
+    'FC Differdange 03': 'ديفردانج 03',
+
+    'FC Lugano': 'لوغانو',
+
+    'FC Midtjylland': 'ميتييلاند',
+
+    'FCSB': 'ستيوا بوخارست',
+
+    'FK Crvena Zvezda': 'النجم الأحمر بلغراد',
+
+    'FK Partizan': 'بارتيزان بلغراد',
+
+    'Fenerbahçe': 'فنربخشة',
+
+    'Ferencvarosi TC': 'فيرينتسفاروش',
+
+    'Flora Tallinn': 'فلورا تالين',
+
+    'Fulham': 'فولهام',
+
+    'Getafe': 'خيتافي',
+
+    'Ghana': 'غانا',
+
+    'Girona': 'جيرونا',
+
+    'HJK Helsinki': 'هلسنكي',
+
+    'Hamrun Spartans': 'هامرون سبارتانز',
+
+    'Ipswich': 'إيبسويتش تاون',
+
+    'Iran': 'إيران',
+
+    'Jagiellonia': 'ياغيلونيا',
+
+    'KI Klaksvik': 'كلاكسفيك',
+
+    'Larne': 'لارن',
+
+    'Las Palmas': 'لاس بالماس',
+
+    'Leganes': 'ليغانيس',
+
+    'Lille': 'ليل',
+
+    'Lincoln Red Imps FC': 'لينكولن ريد إمبس',
+
+    'Ludogorets': 'لودوغوريتس',
+
+    'Maccabi Tel Aviv': 'مكابي تل أبيب',
+
+    'Mallorca': 'مايوركا',
+
+    'Malmo FF': 'مالمو',
+
+    'Mexico': 'المكسيك',
+
+    'Monaco': 'موناكو',
+
+    'Nottingham Forest': 'نوتنغهام فورست',
+
+    'Ordabasy': 'أورداباسي',
+
+    'Osasuna': 'أوساسونا',
+
+    'PAOK': 'باوك',
+
+    'Panevėžys': 'بانيفيجيس',
+
+    'Petrocub': 'بيتروكوب',
+
+    'Poland': 'بولندا',
+
+    'Pyunik Yerevan': 'بيونيك يريفان',
+
+    'Qarabag': 'قره باغ',
+
+    'Qatar': 'قطر',
+
+    'Rayo Vallecano': 'رايو فاييكانو',
+
+    'Real Betis': 'ريال بيتيس',
+
+    'Real Sociedad': 'ريال سوسيداد',
+
+    'Red Bull Salzburg': 'ريد بول سالزبورغ',
+
+    'Rīgas FS': 'ريغاس',
+
+    'Senegal': 'السنغال',
+
+    'Serbia': 'صربيا',
+
+    'Shakhtar Donetsk': 'شاختار دونيتسك',
+
+    'Shamrock Rovers': 'شامروك روفرز',
+
+    'Slavia Praha': 'سلافيا براغ',
+
+    'Slovan Bratislava': 'سلوفان براتيسلافا',
+
+    'Southampton': 'ساوثهامبتون',
+
+    'Sparta Praha': 'سبارتا براغ',
+
+    'Stade Brestois 29': 'بريست',
+
+    'Struga': 'ستروغا',
+
+    'Sturm Graz': 'شتورم غراتس',
+
+    'Switzerland': 'سويسرا',
+
+    'The New Saints': 'ذا نيو سينتس',
+
+    'Tunisia': 'تونس',
+
+    'Twente': 'تفينتي',
+
+    'UE Santa Coloma': 'سانتا كولوما',
+
+    'Union St. Gilloise': 'سانت جيلواز',
+
+    'Uruguay': 'الأوروغواي',
+
+    'Valladolid': 'بلد الوليد',
+
+    'VfB Stuttgart': 'شتوتغارت',
+
+    'Vikingur Reykjavik': 'فيكينغور ريكيافيك',
+
+    'Virtus': 'فيرتوس',
+
+    'Wales': 'ويلز',
+
+    'Wolves': 'وولفرهامبتون',
+
 }
 
 def team_ar_name(name):
@@ -170,6 +400,31 @@ def translate_round_ar(round_en: str | None) -> str | None:
     for k, v in mapping.items():
         if low == k:
             return v
+
+    # European qualifying rounds
+    qualifying_mapping = {
+        "preliminary round": "الدور التمهيدي",
+        "1st qualifying round": "الدور التأهيلي الأول",
+        "2nd qualifying round": "الدور التأهيلي الثاني",
+        "3rd qualifying round": "الدور التأهيلي الثالث",
+        "qualifying round": "الدور التأهيلي",
+        "play-off round": "الدور الفاصل",
+        "playoff round": "الدور الفاصل",
+        "league stage": "مرحلة الدوري",
+    }
+
+    if low in qualifying_mapping:
+        return qualifying_mapping[low]
+
+    # League phase rounds
+    m = re.search(r"(league stage|league phase)\s*-\s*(\d+)", low)
+    if m:
+        return f"مرحلة الدوري - الجولة {int(m.group(2))}"
+
+    # Knockout phase
+    m = re.search(r"(knockout round play-offs?)", low)
+    if m:
+        return "ملحق الأدوار الإقصائية"
 
     # Regular season rounds
     m = re.search(r"(regular season)\s*-\s*(\d+)", low)
@@ -3552,6 +3807,122 @@ async def save_competition_dataset(
     )
 
 
+
+COUNTRY_AR_NAMES = {
+    "World": "العالم",
+    "England": "إنجلترا",
+    "Spain": "إسبانيا",
+    "Italy": "إيطاليا",
+    "Germany": "ألمانيا",
+    "France": "فرنسا",
+    "Saudi-Arabia": "السعودية",
+    "Saudi Arabia": "السعودية",
+    "Portugal": "البرتغال",
+    "Netherlands": "هولندا",
+    "Belgium": "بلجيكا",
+    "Scotland": "اسكتلندا",
+    "Switzerland": "سويسرا",
+    "Austria": "النمسا",
+    "Turkey": "تركيا",
+    "Greece": "اليونان",
+    "Denmark": "الدنمارك",
+    "Norway": "النرويج",
+    "Sweden": "السويد",
+    "Croatia": "كرواتيا",
+    "Serbia": "صربيا",
+    "Ukraine": "أوكرانيا",
+    "Poland": "بولندا",
+    "Cyprus": "قبرص",
+    "Israel": "إسرائيل",
+    "Czech-Republic": "التشيك",
+    "Czech Republic": "التشيك",
+}
+
+def country_ar_name(name):
+    if not name:
+        return name
+    return COUNTRY_AR_NAMES.get(name, name)
+
+
+def localize_competition_items(kind: str, items: list) -> list:
+    localized = []
+
+    for original in items or []:
+        if not isinstance(original, dict):
+            localized.append(original)
+            continue
+
+        item = dict(original)
+
+        if kind == "matches":
+            league = dict(item.get("league") or {})
+            league["name_ar"] = league_ar_name(
+                league.get("name_en") or league.get("name")
+            )
+            league["round_ar"] = translate_round_ar(
+                league.get("round_en") or league.get("round")
+            )
+            league["country_ar"] = country_ar_name(
+                league.get("country")
+            )
+            item["league"] = league
+
+            teams = dict(item.get("teams") or {})
+
+            for side in ("home", "away"):
+                team = dict(teams.get(side) or {})
+                team["name_ar"] = team_ar_name(
+                    team.get("name_en") or team.get("name")
+                )
+                teams[side] = team
+
+            item["teams"] = teams
+
+        elif kind == "teams":
+            item["name_ar"] = team_ar_name(
+                item.get("name_en") or item.get("name")
+            )
+            item["country_ar"] = country_ar_name(
+                item.get("country")
+            )
+
+        elif kind == "standings":
+            team = dict(item.get("team") or {})
+            team["name_ar"] = team_ar_name(
+                team.get("name_en") or team.get("name")
+            )
+            item["team"] = team
+
+        elif kind == "scorers":
+            statistics = []
+
+            for original_stat in item.get("statistics") or []:
+                stat = dict(original_stat)
+
+                team = dict(stat.get("team") or {})
+                team["name_ar"] = team_ar_name(
+                    team.get("name")
+                )
+                stat["team"] = team
+
+                league = dict(stat.get("league") or {})
+                league["name_ar"] = league_ar_name(
+                    league.get("name")
+                )
+                league["country_ar"] = country_ar_name(
+                    league.get("country")
+                )
+                stat["league"] = league
+
+                statistics.append(stat)
+
+            item["statistics"] = statistics
+
+        localized.append(item)
+
+    return localized
+
+
 async def load_competition_dataset(
     league_id: int,
     season: int,
@@ -3570,7 +3941,12 @@ async def load_competition_dataset(
     if not doc:
         return []
 
-    return doc.get("items") or []
+    items = doc.get("items") or []
+
+    return localize_competition_items(
+        kind,
+        items,
+    )
 
 
 async def sync_competition_dataset(
