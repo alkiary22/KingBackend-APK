@@ -977,16 +977,74 @@ async def get_server_time():
 @api_router.get("/teams", response_model=List[TeamModel])
 async def get_teams():
     """
-    ⚠️ لا نغيّر الـAPI، فقط نضيف دعم أندية/فرق API-Football بالإضافة لفرق كأس العالم.
+    فرق كأس العالم + football_teams + جميع فرق البطولات المخزنة.
     """
-    extra_teams = await db.football_teams.find({}, {"_id": 0}).to_list(20000)
-    # WORLD_CUP_TEAMS are dicts already matching TeamModel keys (with maybe no logo)
-    merged = list(WORLD_CUP_TEAMS)
-    # ensure not duplicate code
-    wc_codes = {t.get("code") for t in WORLD_CUP_TEAMS}
-    for t in extra_teams:
-        if t.get("code") and t["code"] not in wc_codes:
-            merged.append(t)
+    merged = []
+    seen_codes = set()
+
+    def add_team(team):
+        code = team.get("code")
+
+        if not code or code in seen_codes:
+            return
+
+        merged.append({
+            "code": code,
+            "name_ar": team.get("name_ar") or team_ar_name(
+                team.get("name_en") or team.get("name")
+            ),
+            "name_en": team.get("name_en") or team.get("name") or code,
+            "confederation": team.get("confederation") or "API-Football",
+            "logo": team.get("logo"),
+            "type": team.get("type") or "club",
+            "api_football_team_id": team.get("api_football_team_id"),
+        })
+
+        seen_codes.add(code)
+
+    for team in WORLD_CUP_TEAMS:
+        add_team(team)
+
+    # فرق البطولات أولاً حتى تكون الترجمة والشعارات هي المعتمدة
+    competition_docs = await db.competition_data.find(
+        {"kind": "teams"},
+        {"_id": 0, "items": 1},
+    ).to_list(1000)
+
+    for doc in competition_docs:
+        for team in doc.get("items") or []:
+            team_id = team.get("id")
+
+            if not team_id:
+                continue
+
+            add_team({
+                "code": af_team_code(team_id),
+                "name_ar": team_ar_name(
+                    team.get("name_en") or team.get("name")
+                ),
+                "name_en": team.get("name_en") or team.get("name"),
+                "confederation": "API-Football",
+                "logo": team.get("logo"),
+                "type": "club",
+                "api_football_team_id": int(team_id),
+            })
+
+    # football_teams تكمل أي فرق غير موجودة في بيانات البطولات
+    extra_teams = await db.football_teams.find(
+        {},
+        {"_id": 0},
+    ).to_list(50000)
+
+    for team in extra_teams:
+        add_team(team)
+
+    merged.sort(
+        key=lambda team: (
+            team.get("name_ar") or team.get("name_en") or ""
+        )
+    )
+
     return merged
 
 
@@ -1004,18 +1062,14 @@ async def list_matches(date: Optional[str] = None):
 async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
     if data.home_team == data.away_team:
         raise HTTPException(status_code=400, detail="لا يمكن أن يكون الفريقان متطابقين")
-    # السماح بفرق كأس العالم + جميع فرق API-Football
-    codes = {t["code"] for t in WORLD_CUP_TEAMS}
+    # السماح بجميع الفرق التي يعرضها /teams للإدارة
+    available_teams = await get_teams()
 
-    extra_teams = await db.football_teams.find(
-        {},
-        {"_id": 0, "code": 1}
-    ).to_list(50000)
-
-    for team in extra_teams:
-        code = team.get("code")
-        if code:
-            codes.add(code)
+    codes = {
+        team.code
+        for team in available_teams
+        if team.code
+    }
 
     if data.home_team not in codes:
         raise HTTPException(
@@ -3613,11 +3667,183 @@ async def fix_match_time(data: MatchTimeByTeamsIn, _staff=Depends(require_staff)
 
 
 
+# ============================================================
+# AUTO SYNC COMPETITION TAB DATA
+# ============================================================
+
+AUTO_COMPETITION_LEAGUES = [
+    (1, "كأس العالم"),
+    (39, "الدوري الإنجليزي"),
+    (140, "الدوري الإسباني"),
+    (135, "الدوري الإيطالي"),
+    (78, "الدوري الألماني"),
+    (61, "الدوري الفرنسي"),
+]
+
+
+async def auto_sync_competition_data_once():
+    """
+    Refresh competition-tab datasets only.
+
+    This function writes to competition_data only through
+    sync_competition_dataset().
+
+    It does NOT touch:
+    - db.matches
+    - db.predictions
+    - prediction points
+    - user total_points
+    """
+
+    started_at = datetime.now(timezone.utc).isoformat()
+
+    results = []
+
+    logger.info(
+        "AUTO COMPETITION SYNC START leagues=%s",
+        len(AUTO_COMPETITION_LEAGUES),
+    )
+
+    for index, (league_id, league_name) in enumerate(
+        AUTO_COMPETITION_LEAGUES
+    ):
+        try:
+            result = await sync_competition_dataset(
+                league_id,
+                2026,
+            )
+
+            results.append({
+                "league_id": league_id,
+                "name": league_name,
+                "ok": True,
+                "matches": result.get("matches", 0),
+                "standings": result.get("standings", 0),
+                "teams": result.get("teams", 0),
+                "scorers": result.get("scorers", 0),
+                "errors": result.get("errors", {}),
+            })
+
+            logger.info(
+                "AUTO COMPETITION SYNC OK league=%s name=%s "
+                "matches=%s standings=%s teams=%s scorers=%s",
+                league_id,
+                league_name,
+                result.get("matches", 0),
+                result.get("standings", 0),
+                result.get("teams", 0),
+                result.get("scorers", 0),
+            )
+
+        except Exception as e:
+            results.append({
+                "league_id": league_id,
+                "name": league_name,
+                "ok": False,
+                "error": repr(e),
+            })
+
+            logger.warning(
+                "AUTO COMPETITION SYNC FAILED league=%s name=%s: %r",
+                league_id,
+                league_name,
+                e,
+            )
+
+        # Football-Data free tier protection.
+        # Keep requests well below the provider rate limit.
+        if index < len(AUTO_COMPETITION_LEAGUES) - 1:
+            await asyncio.sleep(70)
+
+    finished_at = datetime.now(timezone.utc).isoformat()
+
+    await db.app_state.update_one(
+        {
+            "key": "last_auto_competition_sync"
+        },
+        {
+            "$set": {
+                "key": "last_auto_competition_sync",
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "season": 2026,
+                "results": results,
+            }
+        },
+        upsert=True,
+    )
+
+    logger.info(
+        "AUTO COMPETITION SYNC FINISHED"
+    )
+
+    return {
+        "ok": True,
+        "season": 2026,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "results": results,
+    }
+
+
+async def auto_sync_competition_data_loop():
+    """
+    Background competition-tab refresh.
+
+    Wait after application startup so deployment can stabilize,
+    then refresh every 6 hours.
+    """
+
+    await asyncio.sleep(180)
+
+    while True:
+        try:
+            await auto_sync_competition_data_once()
+
+        except Exception as e:
+            logger.warning(
+                "AUTO COMPETITION LOOP FAILED: %r",
+                e,
+            )
+
+        await asyncio.sleep(21600)
+
+
+@api_router.get("/admin/competitions/auto-sync-status")
+async def admin_competition_auto_sync_status(
+    _staff=Depends(require_staff),
+):
+    doc = await db.app_state.find_one(
+        {
+            "key": "last_auto_competition_sync"
+        },
+        {
+            "_id": 0
+        },
+    )
+
+    return doc or {
+        "key": "last_auto_competition_sync",
+        "started_at": None,
+        "finished_at": None,
+        "season": 2026,
+        "results": [],
+    }
+
+
+@api_router.post("/admin/competitions/auto-sync-now")
+async def admin_competition_auto_sync_now(
+    _staff=Depends(require_staff),
+):
+    return await auto_sync_competition_data_once()
+
+
 @app.on_event("startup")
 async def start_auto_sync_results():
     asyncio.create_task(auto_sync_results_loop())
     asyncio.create_task(auto_match_reminders_loop())
     asyncio.create_task(auto_sync_api_football_results_loop())
+    asyncio.create_task(auto_sync_competition_data_loop())
 
 
 
@@ -3672,6 +3898,357 @@ async def admin_recalculate_challenge_scores(_staff=Depends(require_staff)):
 # ============================================================
 # COMPETITIONS API
 # ============================================================
+
+# Football-Data.org is used for current 2026/2027 competition fixtures
+# where the current API-Football plan does not expose the requested season.
+FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
+
+FOOTBALL_DATA_COMPETITIONS = {
+    1: "WC",     # FIFA World Cup
+    39: "PL",    # Premier League
+    140: "PD",   # La Liga
+    135: "SA",   # Serie A
+    78: "BL1",   # Bundesliga
+    61: "FL1",   # Ligue 1
+    2: "CL",     # UEFA Champions League
+}
+
+
+def football_data_status_short(status):
+    value = str(status or "").upper().strip()
+
+    mapping = {
+        "SCHEDULED": "NS",
+        "TIMED": "NS",
+        "IN_PLAY": "LIVE",
+        "PAUSED": "HT",
+        "FINISHED": "FT",
+        "SUSPENDED": "SUSP",
+        "POSTPONED": "PST",
+        "CANCELLED": "CANC",
+        "AWARDED": "FT",
+    }
+
+    return mapping.get(value, value or "NS")
+
+
+def simplify_football_data_match(item, league_id, season):
+    competition = item.get("competition") or {}
+    home = item.get("homeTeam") or {}
+    away = item.get("awayTeam") or {}
+    score = item.get("score") or {}
+    full_time = score.get("fullTime") or {}
+
+    status_name = item.get("status")
+    status_short = football_data_status_short(status_name)
+
+    home_score = full_time.get("home")
+    away_score = full_time.get("away")
+
+    return {
+        "fixture_id": f"fd:{item.get('id')}",
+        "external_provider": "football_data",
+        "external_fixture_id": item.get("id"),
+        "timestamp": int(
+            datetime.fromisoformat(
+                str(item.get("utcDate")).replace("Z", "+00:00")
+            ).timestamp()
+        ) if item.get("utcDate") else 0,
+        "kickoff_utc": item.get("utcDate"),
+        "status": {
+            "short": status_short,
+            "long": status_name,
+            "elapsed": None,
+        },
+        "league": {
+            "id": league_id,
+            "name": competition.get("name"),
+            "name_en": competition.get("name"),
+            "country": None,
+            "season": season,
+            "round": item.get("matchday"),
+            "round_en": (
+                f"Regular Season - {item.get('matchday')}"
+                if item.get("matchday") is not None
+                else item.get("stage")
+            ),
+        },
+        "teams": {
+            "home": {
+                "id": home.get("id"),
+                "code": f"fd:{home.get('id')}",
+                "name": home.get("name"),
+                "name_en": home.get("name"),
+                "logo": home.get("crest"),
+            },
+            "away": {
+                "id": away.get("id"),
+                "code": f"fd:{away.get('id')}",
+                "name": away.get("name"),
+                "name_en": away.get("name"),
+                "logo": away.get("crest"),
+            },
+        },
+        "goals": {
+            "home": home_score,
+            "away": away_score,
+        },
+    }
+
+
+async def fetch_football_data_matches(league_id: int, season: int):
+    competition_code = FOOTBALL_DATA_COMPETITIONS.get(int(league_id))
+
+    if not competition_code:
+        raise ValueError(
+            f"Football-Data competition mapping not found for league {league_id}"
+        )
+
+    token = os.environ.get("FOOTBALL_DATA_TOKEN")
+
+    if not token:
+        raise ValueError("FOOTBALL_DATA_TOKEN غير موجود")
+
+    url = (
+        f"{FOOTBALL_DATA_BASE_URL}/competitions/"
+        f"{competition_code}/matches"
+    )
+
+    headers = {
+        "X-Auth-Token": token,
+    }
+
+    params = {
+        "season": int(season),
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.get(
+            url,
+            headers=headers,
+            params=params,
+        )
+
+        response.raise_for_status()
+        payload = response.json()
+
+    matches = [
+        simplify_football_data_match(
+            item,
+            league_id,
+            season,
+        )
+        for item in (payload.get("matches") or [])
+    ]
+
+    matches.sort(
+        key=lambda x: x.get("timestamp") or 0
+    )
+
+    return matches
+
+
+async def football_data_get_competition_dataset(
+    league_id: int,
+    season: int,
+    kind: str,
+):
+    competition_code = FOOTBALL_DATA_COMPETITIONS.get(int(league_id))
+
+    if not competition_code:
+        raise ValueError(
+            f"Football-Data competition mapping not found for league {league_id}"
+        )
+
+    token = os.environ.get("FOOTBALL_DATA_TOKEN")
+
+    if not token:
+        raise ValueError("FOOTBALL_DATA_TOKEN غير موجود")
+
+    url = (
+        f"{FOOTBALL_DATA_BASE_URL}/competitions/"
+        f"{competition_code}/{kind}"
+    )
+
+    headers = {
+        "X-Auth-Token": token,
+    }
+
+    params = {
+        "season": int(season),
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.get(
+            url,
+            headers=headers,
+            params=params,
+        )
+
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
+
+            raise RuntimeError(
+                f"Football-Data rate limit"
+                + (
+                    f"; retry after {retry_after} seconds"
+                    if retry_after
+                    else ""
+                )
+            )
+
+        response.raise_for_status()
+
+        return response.json()
+
+
+async def fetch_football_data_standings(
+    league_id: int,
+    season: int,
+):
+    payload = await football_data_get_competition_dataset(
+        league_id,
+        season,
+        "standings",
+    )
+
+    standings = []
+
+    tables = payload.get("standings") or []
+
+    total_tables = [
+        table
+        for table in tables
+        if str(table.get("type") or "").upper() == "TOTAL"
+    ]
+
+    if not total_tables and tables:
+        total_tables = [tables[0]]
+
+    for table_data in total_tables:
+        for row in table_data.get("table") or []:
+            team = row.get("team") or {}
+
+            standings.append({
+                "rank": row.get("position"),
+                "points": row.get("points"),
+                "played": row.get("playedGames"),
+                "win": row.get("won"),
+                "draw": row.get("draw"),
+                "lose": row.get("lost"),
+                "gf": row.get("goalsFor"),
+                "ga": row.get("goalsAgainst"),
+                "gd": row.get("goalDifference"),
+                "team": {
+                    "id": team.get("id"),
+                    "code": f"fd:{team.get('id')}",
+                    "name_en": team.get("name"),
+                    "name_ar": team_ar_name(
+                        team.get("name")
+                    ),
+                    "logo": team.get("crest"),
+                },
+            })
+
+    standings.sort(
+        key=lambda x: (
+            x.get("rank") is None,
+            x.get("rank") or 9999,
+        )
+    )
+
+    return standings
+
+
+async def fetch_football_data_teams(
+    league_id: int,
+    season: int,
+):
+    payload = await football_data_get_competition_dataset(
+        league_id,
+        season,
+        "teams",
+    )
+
+    teams = []
+
+    for item in payload.get("teams") or []:
+        teams.append({
+            "id": item.get("id"),
+            "code": f"fd:{item.get('id')}",
+            "name_en": item.get("name"),
+            "name_ar": team_ar_name(
+                item.get("name")
+            ),
+            "logo": item.get("crest"),
+            "country": (
+                (item.get("area") or {}).get("name")
+            ),
+        })
+
+    return teams
+
+
+async def fetch_football_data_scorers(
+    league_id: int,
+    season: int,
+):
+    payload = await football_data_get_competition_dataset(
+        league_id,
+        season,
+        "scorers",
+    )
+
+    scorers = []
+
+    for item in payload.get("scorers") or []:
+        player = item.get("player") or {}
+        team = item.get("team") or {}
+
+        scorers.append({
+            "player": {
+                "id": player.get("id"),
+                "name": player.get("name"),
+                "firstname": None,
+                "lastname": None,
+                "photo": None,
+            },
+            "statistics": [
+                {
+                    "team": {
+                        "id": team.get("id"),
+                        "name": team.get("name"),
+                        "name_en": team.get("name"),
+                        "name_ar": team_ar_name(
+                            team.get("name")
+                        ),
+                        "logo": team.get("crest"),
+                    },
+                    "league": {
+                        "id": league_id,
+                        "name": (
+                            (
+                                payload.get("competition")
+                                or {}
+                            ).get("name")
+                        ),
+                        "country": None,
+                        "season": season,
+                    },
+                    "goals": {
+                        "total": item.get("goals"),
+                        "assists": item.get("assists"),
+                        "penalty": item.get("penalties"),
+                    },
+                    "games": {
+                        "appearences": None,
+                    },
+                }
+            ],
+        })
+
+    return scorers
+
 
 async def resolve_competition_season(
     league_id: int,
@@ -3757,6 +4334,11 @@ async def get_competitions():
         effective_season = await resolve_competition_season(
             int(row["id"])
         )
+
+        # Football-Data labels the 2025/2026 Champions League
+        # by its starting year: 2025.
+        if int(row["id"]) == 2:
+            effective_season = 2025
 
         row["api_current_season"] = row.get("current_season")
         row["current_season"] = effective_season
@@ -3938,6 +4520,43 @@ async def load_competition_dataset(
         },
     )
 
+    if kind == "matches" and league_id in FOOTBALL_DATA_COMPETITIONS:
+        try:
+            fresh_items = await fetch_football_data_matches(
+                league_id,
+                season,
+            )
+
+            await db.competition_data.update_one(
+                {
+                    "_id": f"matches:{league_id}:{season}"
+                },
+                {
+                    "$set": {
+                        "league_id": league_id,
+                        "season": season,
+                        "kind": "matches",
+                        "items": fresh_items,
+                        "source": "football_data",
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                },
+                upsert=True,
+            )
+
+            return localize_competition_items(
+                kind,
+                fresh_items,
+            )
+
+        except Exception as exc:
+            logger.warning(
+                "FOOTBALL-DATA LIVE REFRESH FAILED league=%s season=%s error=%s",
+                league_id,
+                season,
+                exc,
+            )
+
     if not doc:
         return []
 
@@ -3988,17 +4607,40 @@ async def sync_competition_dataset(
     # =========================
     # MATCHES
     # =========================
-    if "matches" in existing:
+    # Always refresh competition-tab matches.
+    # This updates competition_data only and does NOT touch:
+    # db.matches, db.predictions, user points, or prediction scoring.
+    try:
 
-        result["matches"] = len(
-            existing["matches"]
-        )
+        if (
+            league_id in FOOTBALL_DATA_COMPETITIONS
+            and (
+                season >= 2026
+                or (
+                    league_id == 2
+                    and season == 2025
+                )
+            )
+        ):
+            logger.info(
+                "COMPETITION MATCHES REFRESH: Football-Data league=%s season=%s",
+                league_id,
+                season,
+            )
 
-        result["skipped"].append("matches")
+            fixtures = await fetch_football_data_matches(
+                league_id,
+                season,
+            )
 
-    else:
+            match_source = "football_data"
 
-        try:
+        else:
+            logger.info(
+                "COMPETITION MATCHES REFRESH: API-Football league=%s season=%s",
+                league_id,
+                season,
+            )
 
             data = await cached_api_football_get(
                 "fixtures",
@@ -4018,6 +4660,10 @@ async def sync_competition_dataset(
                 key=lambda x: x.get("timestamp") or 0
             )
 
+            match_source = "api_football"
+
+        # Protect existing competition-tab data from accidental empty overwrite.
+        if fixtures:
             await save_competition_dataset(
                 league_id,
                 season,
@@ -4026,25 +4672,69 @@ async def sync_competition_dataset(
             )
 
             result["matches"] = len(fixtures)
+            result["matches_source"] = match_source
+            result["matches_refreshed"] = True
 
-        except Exception as e:
+        else:
+            old_matches = existing.get("matches") or []
 
-            result["errors"]["matches"] = str(e)
+            result["matches"] = len(old_matches)
+            result["matches_source"] = "existing"
+            result["matches_refreshed"] = False
+            result["errors"]["matches"] = (
+                "Provider returned zero fixtures; existing competition data preserved"
+            )
+
+    except Exception as e:
+
+        old_matches = existing.get("matches") or []
+
+        result["matches"] = len(old_matches)
+        result["matches_source"] = "existing"
+        result["matches_refreshed"] = False
+        result["errors"]["matches"] = str(e)
+
+        logger.warning(
+            "COMPETITION MATCHES REFRESH FAILED league=%s season=%s: %s",
+            league_id,
+            season,
+            e,
+        )
 
     # =========================
     # STANDINGS
     # =========================
-    if "standings" in existing:
+    try:
 
-        result["standings"] = len(
-            existing["standings"]
-        )
+        if (
+            league_id in FOOTBALL_DATA_COMPETITIONS
+            and (
+                season >= 2026
+                or (
+                    league_id == 2
+                    and season == 2025
+                )
+            )
+        ):
+            logger.info(
+                "COMPETITION STANDINGS REFRESH: Football-Data league=%s season=%s",
+                league_id,
+                season,
+            )
 
-        result["skipped"].append("standings")
+            standings = await fetch_football_data_standings(
+                league_id,
+                season,
+            )
 
-    else:
+            standings_source = "football_data"
 
-        try:
+        else:
+            logger.info(
+                "COMPETITION STANDINGS REFRESH: API-Football league=%s season=%s",
+                league_id,
+                season,
+            )
 
             data = await cached_api_football_get(
                 "standings",
@@ -4058,27 +4748,16 @@ async def sync_competition_dataset(
             standings = []
 
             for league in data.get("response", []):
-
                 tables = (
                     league.get("league", {})
                     .get("standings", [])
                 )
 
                 for table in tables:
-
                     for team in table:
-
-                        team_data = (
-                            team.get("team", {})
-                        )
-
-                        all_data = (
-                            team.get("all", {})
-                        )
-
-                        goals = (
-                            all_data.get("goals", {})
-                        )
+                        team_data = team.get("team", {})
+                        all_data = team.get("all", {})
+                        goals = all_data.get("goals", {})
 
                         standings.append({
                             "rank": team.get("rank"),
@@ -4103,6 +4782,9 @@ async def sync_competition_dataset(
                             },
                         })
 
+            standings_source = "api_football"
+
+        if standings:
             await save_competition_dataset(
                 league_id,
                 season,
@@ -4111,25 +4793,66 @@ async def sync_competition_dataset(
             )
 
             result["standings"] = len(standings)
+            result["standings_source"] = standings_source
+            result["standings_refreshed"] = True
 
-        except Exception as e:
+        else:
+            old_standings = existing.get("standings") or []
 
-            result["errors"]["standings"] = str(e)
+            result["standings"] = len(old_standings)
+            result["standings_source"] = "existing"
+            result["standings_refreshed"] = False
+
+    except Exception as e:
+
+        old_standings = existing.get("standings") or []
+
+        result["standings"] = len(old_standings)
+        result["standings_source"] = "existing"
+        result["standings_refreshed"] = False
+        result["errors"]["standings"] = repr(e)
+
+        logger.warning(
+            "COMPETITION STANDINGS REFRESH FAILED league=%s season=%s: %r",
+            league_id,
+            season,
+            e,
+        )
 
     # =========================
     # TEAMS
     # =========================
-    if "teams" in existing:
+    try:
 
-        result["teams"] = len(
-            existing["teams"]
-        )
+        if (
+            league_id in FOOTBALL_DATA_COMPETITIONS
+            and (
+                season >= 2026
+                or (
+                    league_id == 2
+                    and season == 2025
+                )
+            )
+        ):
+            logger.info(
+                "COMPETITION TEAMS REFRESH: Football-Data league=%s season=%s",
+                league_id,
+                season,
+            )
 
-        result["skipped"].append("teams")
+            teams = await fetch_football_data_teams(
+                league_id,
+                season,
+            )
 
-    else:
+            teams_source = "football_data"
 
-        try:
+        else:
+            logger.info(
+                "COMPETITION TEAMS REFRESH: API-Football league=%s season=%s",
+                league_id,
+                season,
+            )
 
             data = await cached_api_football_get(
                 "teams",
@@ -4143,7 +4866,6 @@ async def sync_competition_dataset(
             teams = []
 
             for item in data.get("response", []):
-
                 team = item.get("team", {})
 
                 teams.append({
@@ -4156,6 +4878,9 @@ async def sync_competition_dataset(
                     "country": team.get("country"),
                 })
 
+            teams_source = "api_football"
+
+        if teams:
             await save_competition_dataset(
                 league_id,
                 season,
@@ -4164,25 +4889,66 @@ async def sync_competition_dataset(
             )
 
             result["teams"] = len(teams)
+            result["teams_source"] = teams_source
+            result["teams_refreshed"] = True
 
-        except Exception as e:
+        else:
+            old_teams = existing.get("teams") or []
 
-            result["errors"]["teams"] = str(e)
+            result["teams"] = len(old_teams)
+            result["teams_source"] = "existing"
+            result["teams_refreshed"] = False
+
+    except Exception as e:
+
+        old_teams = existing.get("teams") or []
+
+        result["teams"] = len(old_teams)
+        result["teams_source"] = "existing"
+        result["teams_refreshed"] = False
+        result["errors"]["teams"] = repr(e)
+
+        logger.warning(
+            "COMPETITION TEAMS REFRESH FAILED league=%s season=%s: %r",
+            league_id,
+            season,
+            e,
+        )
 
     # =========================
     # SCORERS
     # =========================
-    if "scorers" in existing:
+    try:
 
-        result["scorers"] = len(
-            existing["scorers"]
-        )
+        if (
+            league_id in FOOTBALL_DATA_COMPETITIONS
+            and (
+                season >= 2026
+                or (
+                    league_id == 2
+                    and season == 2025
+                )
+            )
+        ):
+            logger.info(
+                "COMPETITION SCORERS REFRESH: Football-Data league=%s season=%s",
+                league_id,
+                season,
+            )
 
-        result["skipped"].append("scorers")
+            scorers = await fetch_football_data_scorers(
+                league_id,
+                season,
+            )
 
-    else:
+            scorers_source = "football_data"
 
-        try:
+        else:
+            logger.info(
+                "COMPETITION SCORERS REFRESH: API-Football league=%s season=%s",
+                league_id,
+                season,
+            )
 
             data = await cached_api_football_get(
                 "players/topscorers",
@@ -4193,10 +4959,10 @@ async def sync_competition_dataset(
                 ttl_seconds=3600,
             )
 
-            scorers = (
-                data.get("response", []) or []
-            )
+            scorers = data.get("response", []) or []
+            scorers_source = "api_football"
 
+        if scorers:
             await save_competition_dataset(
                 league_id,
                 season,
@@ -4205,10 +4971,31 @@ async def sync_competition_dataset(
             )
 
             result["scorers"] = len(scorers)
+            result["scorers_source"] = scorers_source
+            result["scorers_refreshed"] = True
 
-        except Exception as e:
+        else:
+            old_scorers = existing.get("scorers") or []
 
-            result["errors"]["scorers"] = str(e)
+            result["scorers"] = len(old_scorers)
+            result["scorers_source"] = "existing"
+            result["scorers_refreshed"] = False
+
+    except Exception as e:
+
+        old_scorers = existing.get("scorers") or []
+
+        result["scorers"] = len(old_scorers)
+        result["scorers_source"] = "existing"
+        result["scorers_refreshed"] = False
+        result["errors"]["scorers"] = repr(e)
+
+        logger.warning(
+            "COMPETITION SCORERS REFRESH FAILED league=%s season=%s: %r",
+            league_id,
+            season,
+            e,
+        )
 
     return result
 
