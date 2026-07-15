@@ -32,11 +32,12 @@ import time
 # Firebase Cloud Messaging
 try:
     import firebase_admin
-    from firebase_admin import credentials, messaging
+    from firebase_admin import credentials, messaging, auth as firebase_auth
 except Exception:
     firebase_admin = None
     credentials = None
     messaging = None
+    firebase_auth = None
 
 
 
@@ -757,6 +758,10 @@ class LoginIn(BaseModel):
     password: str
 
 
+class GoogleAuthIn(BaseModel):
+    id_token: str = Field(min_length=20)
+
+
 class AuthOut(BaseModel):
     user: UserPublic
     token: str
@@ -961,6 +966,94 @@ async def login(data: LoginIn):
         raise HTTPException(status_code=401, detail="البريد أو كلمة المرور غير صحيحة")
     token = create_token(user["id"])
     return {"user": user_to_public(user), "token": token}
+
+
+@api_router.post("/auth/google", response_model=AuthOut)
+async def google_login(data: GoogleAuthIn):
+    if firebase_admin is None or firebase_auth is None:
+        raise HTTPException(
+            status_code=503,
+            detail="تسجيل الدخول بواسطة Google غير متاح حالياً",
+        )
+
+    try:
+        decoded = firebase_auth.verify_id_token(
+            data.id_token,
+            check_revoked=False,
+        )
+    except Exception as exc:
+        logger.warning(
+            "GOOGLE AUTH TOKEN VERIFY FAILED: %s",
+            exc,
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="تعذر التحقق من حساب Google",
+        )
+
+    email = str(decoded.get("email") or "").lower().strip()
+    name = str(decoded.get("name") or "").strip()
+    picture = str(decoded.get("picture") or "").strip()
+    firebase_uid = str(decoded.get("uid") or decoded.get("sub") or "").strip()
+    email_verified = bool(decoded.get("email_verified"))
+
+    if not email or not firebase_uid:
+        raise HTTPException(
+            status_code=401,
+            detail="حساب Google لا يحتوي على بيانات دخول صالحة",
+        )
+
+    if not email_verified:
+        raise HTTPException(
+            status_code=401,
+            detail="البريد الإلكتروني في حساب Google غير موثّق",
+        )
+
+    user = await db.users.find_one({"email": email})
+
+    if user:
+        updates = {
+            "google_uid": firebase_uid,
+            "auth_provider": "google",
+        }
+
+        if picture and not user.get("avatar"):
+            updates["avatar"] = picture
+
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": updates},
+        )
+
+        user = {
+            **user,
+            **updates,
+        }
+
+    else:
+        user_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        user = {
+            "id": user_id,
+            "email": email,
+            "name": name or email.split("@", 1)[0],
+            "role": "user",
+            "total_points": 0,
+            "avatar": picture or None,
+            "google_uid": firebase_uid,
+            "auth_provider": "google",
+            "created_at": now,
+        }
+
+        await db.users.insert_one(user)
+
+    token = create_token(user["id"])
+
+    return {
+        "user": user_to_public(user),
+        "token": token,
+    }
 
 
 @api_router.get("/auth/me", response_model=UserPublic)
