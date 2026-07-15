@@ -27,6 +27,7 @@ import asyncio
 import hashlib
 import json
 import httpx
+import time
 
 # Firebase Cloud Messaging
 try:
@@ -3996,6 +3997,169 @@ def simplify_football_data_match(item, league_id, season):
     }
 
 
+
+_HIGHLIGHTLY_LIVE_CACHE = {}
+_HIGHLIGHTLY_LIVE_CACHE_TTL = 60
+
+
+async def enrich_matches_from_highlightly(matches: list):
+    """
+    Enrich LIVE competition-tab matches from Highlightly only.
+    Does not touch db.matches, predictions, points, or scoring.
+    """
+    key = os.environ.get("HIGHLIGHTLY_API_KEY")
+
+    if not key:
+        return matches
+
+    live_matches = [
+        match
+        for match in matches
+        if (match.get("status") or {}).get("short") in {
+            "LIVE", "1H", "2H", "HT", "ET", "P", "BT"
+        }
+    ]
+
+    if not live_matches:
+        return matches
+
+    dates = set()
+
+    for match in live_matches:
+        kickoff = match.get("kickoff_utc")
+
+        if kickoff:
+            dates.add(str(kickoff)[:10])
+
+    headers = {
+        "x-rapidapi-key": key,
+    }
+
+    highlightly_matches = []
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for match_date in dates:
+                now_ts = time.time()
+                cached = _HIGHLIGHTLY_LIVE_CACHE.get(match_date)
+
+                if (
+                    cached
+                    and now_ts - cached["time"] < _HIGHLIGHTLY_LIVE_CACHE_TTL
+                ):
+                    day_matches = cached["items"]
+
+                    logger.info(
+                        "HIGHLIGHTLY LIVE CACHE HIT date=%s",
+                        match_date,
+                    )
+                else:
+                    response = await client.get(
+                        "https://soccer.highlightly.net/matches",
+                        headers=headers,
+                        params={
+                            "date": match_date,
+                            "timezone": "Asia/Riyadh",
+                            "limit": 100,
+                        },
+                    )
+
+                    response.raise_for_status()
+
+                    payload = response.json()
+                    day_matches = payload.get("data") or []
+
+                    _HIGHLIGHTLY_LIVE_CACHE[match_date] = {
+                        "time": now_ts,
+                        "items": day_matches,
+                    }
+
+                highlightly_matches.extend(day_matches)
+
+    except Exception as exc:
+        logger.warning(
+            "HIGHLIGHTLY LIVE ENRICH FAILED error=%s",
+            exc,
+        )
+
+        return matches
+
+    def normalize_name(value):
+        return (
+            str(value or "")
+            .lower()
+            .replace(".", "")
+            .replace("-", " ")
+            .strip()
+        )
+
+    for match in matches:
+        status = match.get("status") or {}
+
+        if status.get("short") not in {
+            "LIVE", "1H", "2H", "HT", "ET", "P", "BT"
+        }:
+            continue
+
+        teams = match.get("teams") or {}
+
+        home_name = normalize_name(
+            (teams.get("home") or {}).get("name")
+        )
+
+        away_name = normalize_name(
+            (teams.get("away") or {}).get("name")
+        )
+
+        for live_item in highlightly_matches:
+            live_home = normalize_name(
+                (live_item.get("homeTeam") or {}).get("name")
+            )
+
+            live_away = normalize_name(
+                (live_item.get("awayTeam") or {}).get("name")
+            )
+
+            if (
+                home_name == live_home
+                and away_name == live_away
+            ):
+                state = live_item.get("state") or {}
+                score = state.get("score") or {}
+                current_score = score.get("current")
+                clock = state.get("clock")
+
+                if clock is not None:
+                    status["elapsed"] = clock
+
+                if current_score:
+                    try:
+                        home_score, away_score = [
+                            int(value.strip())
+                            for value in current_score.split("-")
+                        ]
+
+                        match["goals"] = {
+                            "home": home_score,
+                            "away": away_score,
+                        }
+
+                    except Exception:
+                        pass
+
+                logger.info(
+                    "HIGHLIGHTLY LIVE MATCH: %s vs %s minute=%s score=%s",
+                    home_name,
+                    away_name,
+                    clock,
+                    current_score,
+                )
+
+                break
+
+    return matches
+
+
 async def fetch_football_data_matches(league_id: int, season: int):
     competition_code = FOOTBALL_DATA_COMPETITIONS.get(int(league_id))
 
@@ -4044,6 +4208,8 @@ async def fetch_football_data_matches(league_id: int, season: int):
     matches.sort(
         key=lambda x: x.get("timestamp") or 0
     )
+
+    matches = await enrich_matches_from_highlightly(matches)
 
     return matches
 
