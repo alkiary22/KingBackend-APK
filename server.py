@@ -982,13 +982,18 @@ async def google_login(data: GoogleAuthIn):
             check_revoked=False,
         )
     except Exception as exc:
-        logger.warning(
-            "GOOGLE AUTH TOKEN VERIFY FAILED: %s",
+        import traceback
+
+        logger.error(
+            "GOOGLE VERIFY ERROR: %r",
             exc,
         )
+
+        logger.error(traceback.format_exc())
+
         raise HTTPException(
             status_code=401,
-            detail="تعذر التحقق من حساب Google",
+            detail=str(exc),
         )
 
     email = str(decoded.get("email") or "").lower().strip()
