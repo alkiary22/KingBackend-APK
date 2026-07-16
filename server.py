@@ -977,6 +977,18 @@ async def google_login(data: GoogleAuthIn):
         )
 
     try:
+        if not firebase_admin._apps:
+            key_path = ROOT_DIR / "serviceAccountKey.json"
+
+            if not key_path.exists():
+                raise HTTPException(
+                    status_code=500,
+                    detail="serviceAccountKey.json not found",
+                )
+
+            cred = credentials.Certificate(str(key_path))
+            firebase_admin.initialize_app(cred)
+
         decoded = firebase_auth.verify_id_token(
             data.id_token,
             check_revoked=False,
