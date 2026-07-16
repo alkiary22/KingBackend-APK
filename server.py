@@ -494,6 +494,7 @@ API_CACHE_TTL_SECONDS = 1800  # 30 minutes
 
 # حماية API-Football من الطلبات المتزامنة والمتكررة
 _api_cache_locks = {}
+_api_memory_cache = {}
 _api_football_blocked_until = None
 API_FOOTBALL_BLOCK_SECONDS = 21600  # 6 ساعات
 
@@ -523,6 +524,13 @@ async def cached_api_football_get(
 
         now = datetime.now(timezone.utc)
 
+        memory = _api_memory_cache.get(key)
+
+        if memory:
+            age=(now-memory["updated"]).total_seconds()
+            if age<ttl_seconds:
+                return memory["data"]
+
         cached = await db.competition_cache.find_one(
             {"_id": key},
             {"_id": 0}
@@ -540,6 +548,12 @@ async def cached_api_football_get(
                 ).total_seconds()
 
                 if age < ttl_seconds:
+
+                    _api_memory_cache[key]={
+                        "data":cached["data"],
+                        "updated":updated,
+                    }
+
                     return cached["data"]
 
             except Exception:
@@ -582,6 +596,11 @@ async def cached_api_football_get(
                 },
                 upsert=True
             )
+
+            _api_memory_cache[key]={
+                "data":data,
+                "updated":now,
+            }
 
             return data
 
