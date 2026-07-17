@@ -3291,7 +3291,7 @@ async def get_challenge_leaderboard(limit: int = 50):
 
 # وقت إغلاق توقع التحدي = بداية أول مباراة في دور الـ32
 # الافتراضي: الإثنين 29 يونيو 2026 الساعة 23:30 مكة = 20:30 UTC
-CHALLENGE_LOCK_AT = os.environ.get("CHALLENGE_LOCK_AT", "2026-06-28T19:00:00+00:00")
+CHALLENGE_LOCK_AT = os.environ.get("CHALLENGE_LOCK_AT", "2026-07-18T21:00:00+00:00")
 
 
 def _parse_challenge_lock_at():
