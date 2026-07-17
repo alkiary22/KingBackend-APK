@@ -2449,7 +2449,7 @@ FINAL_CHALLENGE_ID = "worldcup2026_final_awards"
 
 # 19 يوليو 2026 الساعة 22:00 بتوقيت مكة = 19:00 UTC
 FINAL_CHALLENGE_CLOSE_AT = datetime(
-    2026, 7, 19, 19, 0, 0, tzinfo=timezone.utc
+    2026, 7, 18, 21, 0, 0, tzinfo=timezone.utc
 )
 
 FINAL_CHALLENGE_POINTS = {
