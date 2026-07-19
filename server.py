@@ -858,6 +858,26 @@ class PredictionIn(BaseModel):
     away_score: int = Field(ge=0, le=30)
 
 
+class CompetitionPredictionIn(BaseModel):
+    fixture_id: str
+    external_provider: Literal["football_data"] = "football_data"
+
+    home_team: str
+    away_team: str
+
+    kickoff: str
+    match_date: str
+
+    competition: str = "football_data"
+
+    league_id: Optional[int] = None
+    league_name_en: Optional[str] = None
+    league_name_ar: Optional[str] = None
+
+    home_score: int = Field(ge=0, le=30)
+    away_score: int = Field(ge=0, le=30)
+
+
 class PredictionModel(BaseModel):
     id: str
     match_id: str
@@ -1284,6 +1304,44 @@ async def set_match_result(match_id: str, data: MatchResultIn, _staff=Depends(re
     return updated
 
 
+
+async def ensure_competition_match(data: CompetitionPredictionIn):
+    existing = await db.matches.find_one(
+        {
+            "external_provider": data.external_provider,
+            "external_fixture_id": int(str(data.fixture_id).replace("fd:", "")),
+        },
+        {"_id": 0},
+    )
+
+    if existing:
+        return existing
+
+    match = {
+        "id": str(uuid.uuid4()),
+        "home_team": data.home_team,
+        "away_team": data.away_team,
+        "match_date": data.match_date,
+        "kickoff": data.kickoff,
+        "competition": data.competition,
+        "stage": "",
+        "group_name": None,
+        "home_score": None,
+        "away_score": None,
+        "status": "scheduled",
+        "external_provider": data.external_provider,
+        "external_fixture_id": int(str(data.fixture_id).replace("fd:", "")),
+        "league_id": data.league_id,
+        "league_name_en": data.league_name_en,
+        "league_name_ar": data.league_name_ar,
+    }
+
+    await db.matches.insert_one(match.copy())
+
+    return match
+
+
+
 # ---------- Predictions ----------
 @api_router.post("/predictions", response_model=PredictionModel)
 async def submit_prediction(data: PredictionIn, user=Depends(get_current_user)):
@@ -1331,6 +1389,23 @@ async def my_predictions(user=Depends(get_current_user)):
 
 
 # ---------- Leaderboard ----------
+
+@api_router.post("/competition/predictions", response_model=PredictionModel)
+async def submit_competition_prediction(
+    data: CompetitionPredictionIn,
+    user=Depends(get_current_user),
+):
+    match = await ensure_competition_match(data)
+
+    prediction = PredictionIn(
+        match_id=match["id"],
+        home_score=data.home_score,
+        away_score=data.away_score,
+    )
+
+    return await submit_prediction(prediction, user)
+
+
 @api_router.get("/leaderboard", response_model=List[LeaderboardEntry])
 async def leaderboard():
     pipeline = [
