@@ -878,6 +878,22 @@ class CompetitionPredictionIn(BaseModel):
     away_score: int = Field(ge=0, le=30)
 
 
+
+class CompetitionPredictionStats(BaseModel):
+    total_predictions: int
+
+    home_win_count: int
+    draw_count: int
+    away_win_count: int
+
+    home_win_percent: int
+    draw_percent: int
+    away_win_percent: int
+
+    same_score_count: int
+    same_score_percent: int
+
+
 class PredictionModel(BaseModel):
     id: str
     match_id: str
@@ -1404,6 +1420,95 @@ async def submit_competition_prediction(
     )
 
     return await submit_prediction(prediction, user)
+
+
+
+
+@api_router.get(
+    "/competition/predictions/stats/{fixture_id}",
+    response_model=CompetitionPredictionStats,
+)
+async def competition_prediction_stats(
+    fixture_id: str,
+    home_score: int | None = None,
+    away_score: int | None = None,
+):
+    fixture = int(str(fixture_id).replace("fd:", ""))
+
+    match = await db.matches.find_one(
+        {
+            "external_fixture_id": fixture
+        },
+        {"_id": 0},
+    )
+
+    if not match:
+        raise HTTPException(
+            status_code=404,
+            detail="Match not found",
+        )
+
+    predictions = await db.predictions.find(
+        {
+            "match_id": match["id"]
+        },
+        {"_id": 0},
+    ).to_list(50000)
+
+    total = len(predictions)
+
+    if total == 0:
+        return CompetitionPredictionStats(
+            total_predictions=0,
+            home_win_count=0,
+            draw_count=0,
+            away_win_count=0,
+            home_win_percent=0,
+            draw_percent=0,
+            away_win_percent=0,
+            same_score_count=0,
+            same_score_percent=0,
+        )
+
+    home = 0
+    draw = 0
+    away = 0
+    exact = 0
+
+    for p in predictions:
+
+        hs = p["home_score"]
+        aw = p["away_score"]
+
+        if hs > aw:
+            home += 1
+        elif hs < aw:
+            away += 1
+        else:
+            draw += 1
+
+        if (
+            home_score is not None
+            and away_score is not None
+            and hs == home_score
+            and aw == away_score
+        ):
+            exact += 1
+
+    return CompetitionPredictionStats(
+        total_predictions=total,
+
+        home_win_count=home,
+        draw_count=draw,
+        away_win_count=away,
+
+        home_win_percent=round(home * 100 / total),
+        draw_percent=round(draw * 100 / total),
+        away_win_percent=round(away * 100 / total),
+
+        same_score_count=exact,
+        same_score_percent=round(exact * 100 / total),
+    )
 
 
 @api_router.get("/leaderboard", response_model=List[LeaderboardEntry])
