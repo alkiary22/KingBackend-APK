@@ -1226,8 +1226,72 @@ async def list_matches(date: Optional[str] = None):
     query = {}
     if date:
         query["match_date"] = date
-    matches = await db.matches.find(query, {"_id": 0}).sort("kickoff", 1).to_list(1000)
-    return matches
+
+    rows = await db.matches.find(query, {"_id": 0}).sort("kickoff", 1).to_list(1000)
+
+    def norm(team):
+        if not team:
+            return ""
+        t = str(team).strip().lower()
+        mapping = {
+            "spain": "es",
+            "argentina": "ar",
+            "france": "fr",
+            "england": "gb-eng",
+            "brazil": "br",
+            "germany": "de",
+            "portugal": "pt",
+            "netherlands": "nl",
+            "belgium": "be",
+            "mexico": "mx",
+            "united states": "us",
+            "usa": "us",
+            "canada": "ca",
+            "morocco": "ma",
+            "japan": "jp",
+            "croatia": "hr",
+            "switzerland": "ch",
+            "colombia": "co",
+            "norway": "no",
+            "paraguay": "py",
+            "austria": "at",
+        }
+        return mapping.get(t, t)
+
+    result = []
+    manual_keys = set()
+
+    # أضف المباريات اليدوية أولاً
+    for m in rows:
+        if m.get("external_provider"):
+            continue
+
+        key = (
+            norm(m.get("home_team")),
+            norm(m.get("away_team")),
+            str(m.get("match_date"))[:10],
+        )
+
+        manual_keys.add(key)
+        result.append(m)
+
+    # أضف الخارجية إذا لم توجد نسخة يدوية
+    for m in rows:
+        if not m.get("external_provider"):
+            continue
+
+        key = (
+            norm(m.get("home_team")),
+            norm(m.get("away_team")),
+            str(m.get("match_date"))[:10],
+        )
+
+        if key in manual_keys:
+            continue
+
+        result.append(m)
+
+    return result
 
 
 @api_router.post("/matches", response_model=MatchModel)
