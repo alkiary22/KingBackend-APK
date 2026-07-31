@@ -2,9 +2,19 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).parent
+
 load_dotenv(ROOT_DIR / '.env')
 
+
 import os
+
+
+API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
+API_FOOTBALL_BASE_URL = os.environ.get(
+    "API_FOOTBALL_BASE_URL",
+    "https://v3.football.api-sports.io",
+)
+CURRENT_API_FOOTBALL_SEASON = 2026
 import uuid
 import logging
 import bcrypt
