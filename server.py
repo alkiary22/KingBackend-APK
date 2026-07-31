@@ -5637,6 +5637,10 @@ async def get_competition_matches(
     league_id: int,
     season: Optional[int] = None,
 ):
+    # إخفاء مباريات كأس العالم فقط
+    if league_id == 1:
+        return []
+
     season = await resolve_competition_season(
         league_id,
         season,
