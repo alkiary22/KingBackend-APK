@@ -873,7 +873,7 @@ class MatchCreate(BaseModel):
     away_team: str
     match_date: str  # ISO date string YYYY-MM-DD
     kickoff: str  # ISO datetime UTC
-    competition: Optional[str] = None
+    competition: str = "worldcup"
     stage: str = "مرحلة المجموعات"
     group_name: Optional[str] = None
 
@@ -900,7 +900,7 @@ class MatchModel(BaseModel):
     away_team: str
     match_date: str
     kickoff: str
-    competition: Optional[str] = None
+    competition: str = "worldcup"
     stage: str
     group_name: Optional[str] = None
     home_score: Optional[int] = None
@@ -1291,39 +1291,11 @@ async def get_teams():
 # ---------- Matches ----------
 @api_router.get("/matches", response_model=List[MatchModel])
 async def list_matches(date: Optional[str] = None):
-    query = {
-        "competition": {
-            "$ne": "worldcup"
-        }
-    }
-
+    query = {}
     if date:
         query["match_date"] = date
 
-    rows = await db.matches.find(
-        {
-            "$or": [
-                {"competition": {"$exists": False}},
-                {"competition": None},
-                {"competition": {"$nin": ["worldcup", "world_cup"]}}
-            ],
-            **({"match_date": date} if date else {})
-        },
-        {"_id": 0}
-    ).sort("kickoff", 1).to_list(1000)
-
-    print("QUERY_ROWS =", len(rows))
-    print("FIRST_ROWS =", [
-        (m.get("competition"), m.get("home_team"), m.get("away_team"))
-        for m in rows[:10]
-    ])
-
-
-    # إخفاء مباريات كأس العالم من تبويب المباريات
-    rows = [
-        m for m in rows
-        if "worldcup" not in str(m.get("competition", "")).lower()
-    ]
+    rows = await db.matches.find(query, {"_id": 0}).sort("kickoff", 1).to_list(1000)
 
     def norm(team):
         if not team:
@@ -1386,12 +1358,6 @@ async def list_matches(date: Optional[str] = None):
             continue
 
         result.append(m)
-
-    # إخفاء جميع المباريات اليدوية (التي لا تملك league_id)
-    result = [
-        m for m in result
-        if m.get("league_id") is not None
-    ]
 
     return result
 
@@ -4958,7 +4924,8 @@ async def get_competitions():
     )
 
     ALLOWED_LEAGUES = {
-                2,      # UEFA Champions League
+        1,      # FIFA World Cup
+        2,      # UEFA Champions League
         3,      # UEFA Europa League
         848,    # UEFA Europa Conference League
         39,     # Premier League
@@ -5670,9 +5637,6 @@ async def get_competition_matches(
     league_id: int,
     season: Optional[int] = None,
 ):
-    # إخفاء مباريات كأس العالم من تبويب البطولات
-    if league_id == 1:
-        return []
     season = await resolve_competition_season(
         league_id,
         season,
