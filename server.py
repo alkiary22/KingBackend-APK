@@ -1297,6 +1297,18 @@ async def list_matches(date: Optional[str] = None):
 
     rows = await db.matches.find(query, {"_id": 0}).sort("kickoff", 1).to_list(1000)
 
+    # إخفاء مباريات كأس العالم من تبويب المباريات فقط
+    rows = [
+        m for m in rows
+        if (
+            m.get("competition") != "worldcup"
+            and m.get("competition") != "world_cup"
+            and m.get("competition_id") != 1
+            and m.get("league_id") != 1
+            and (m.get("league") or {}).get("id") != 1
+        )
+    ]
+
     def norm(team):
         if not team:
             return ""
