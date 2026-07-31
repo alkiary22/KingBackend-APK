@@ -5,6 +5,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 import os
+API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY", "")
 import uuid
 import logging
 import bcrypt
