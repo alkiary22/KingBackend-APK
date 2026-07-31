@@ -339,38 +339,72 @@ TEAM_AR_NAMES = {
 
     'Wolves': 'وولفرهامبتون',
 
-}
 
-def team_ar_name(name):
-    if not name:
-        return name
-    return TEAM_AR_NAMES.get(name, name)
-
-
-# =======================
-# API-Football (API-Sports)
-# =======================
-API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
-API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
-CURRENT_API_FOOTBALL_SEASON = int(os.environ.get("API_FOOTBALL_SEASON", "2024"))
-
-API_FOOTBALL_FINISHED_SHORT = {"FT", "AET", "PEN"}  # final, after extra time, penalties
-API_FOOTBALL_LIVE_SHORT = {"1H", "2H", "HT", "ET", "P", "LIVE", "BT"}
+    "Deportivo Alavés": "ديبورتيفو ألافيس",
+    "Getafe CF": "خيتافي",
+    "Sevilla FC": "إشبيلية",
+    "Rayo Vallecano de Madrid": "رايو فاييكانو",
+    "Real Racing Club de Santander": "راسينغ سانتاندير",
+    "Villarreal CF": "فياريال",
+    "RCD Espanyol de Barcelona": "إسبانيول",
+    "Levante UD": "ليفانتي",
+    "RC Celta de Vigo": "سيلتا فيغو",
+    "CA Osasuna": "أوساسونا",
+    "RC Deportivo La Coruña": "ديبورتيفو لا كورونيا",
+    "Elche CF": "إلتشي",
+    "Club Atlético de Madrid": "أتلتيكو مدريد",
+    "Málaga CF": "مالقة",
+    "Real Betis Balompié": "ريال بيتيس",
+    "Real Sociedad de Fútbol": "ريال سوسيداد",
+    "Athletic Club": "أتلتيك بلباو",}
 
 LEAGUE_AR_NAMES = {
     "Premier League": "الدوري الإنجليزي الممتاز",
     "La Liga": "الدوري الإسباني",
+    "Primera División": "الدوري الإسباني",
     "Serie A": "الدوري الإيطالي",
     "Bundesliga": "الدوري الألماني",
     "Ligue 1": "الدوري الفرنسي",
-    "Saudi Pro League": "دوري روشن السعودي",
     "UEFA Champions League": "دوري أبطال أوروبا",
     "UEFA Europa League": "الدوري الأوروبي",
-    "UEFA Europa Conference League": "دوري المؤتمر الأوروبي",
     "UEFA Conference League": "دوري المؤتمر الأوروبي",
-    "World Cup": "كأس العالم",
-    "FIFA World Cup": "كأس العالم",
+    "Saudi Pro League": "دوري روشن السعودي",
 }
+
+
+
+
+def team_ar_name(name):
+    if not name:
+        return name
+
+    name = str(name).strip()
+
+    aliases = [
+        name,
+        name.replace(" FC", ""),
+        name.replace(" CF", ""),
+        name.replace(" AFC", ""),
+        name.replace(" AC", ""),
+        name.replace(" SC", ""),
+        name.replace(" UD", ""),
+        name.replace(" CD", ""),
+        name.replace(" Club", ""),
+        name.replace(" Football Club", ""),
+        name.replace(" Club Atlético de ", ""),
+        name.replace(" Real ", ""),
+        name.replace(" RC ", ""),
+        name.replace(" RCD ", ""),
+        name.replace(" CA ", ""),
+    ]
+
+    for alias in aliases:
+        alias = alias.strip()
+        if alias in TEAM_AR_NAMES:
+            return TEAM_AR_NAMES[alias]
+
+    return TEAM_AR_NAMES.get(name, name)
+
 
 def league_ar_name(name: str | None):
     if not name:
@@ -4547,10 +4581,10 @@ async def fetch_football_data_matches(league_id: int, season: int):
             f"Football-Data competition mapping not found for league {league_id}"
         )
 
-    token = os.environ.get("FOOTBALL_DATA_TOKEN")
+    token = os.environ.get("API_FOOTBALL_KEY") or os.environ.get("FOOTBALL_DATA_TOKEN")
 
     if not token:
-        raise ValueError("FOOTBALL_DATA_TOKEN غير موجود")
+        raise ValueError("API_FOOTBALL_KEY أو FOOTBALL_DATA_TOKEN غير موجود")
 
     url = (
         f"{FOOTBALL_DATA_BASE_URL}/competitions/"
@@ -4605,10 +4639,10 @@ async def football_data_get_competition_dataset(
             f"Football-Data competition mapping not found for league {league_id}"
         )
 
-    token = os.environ.get("FOOTBALL_DATA_TOKEN")
+    token = os.environ.get("API_FOOTBALL_KEY") or os.environ.get("FOOTBALL_DATA_TOKEN")
 
     if not token:
-        raise ValueError("FOOTBALL_DATA_TOKEN غير موجود")
+        raise ValueError("API_FOOTBALL_KEY أو FOOTBALL_DATA_TOKEN غير موجود")
 
     url = (
         f"{FOOTBALL_DATA_BASE_URL}/competitions/"
