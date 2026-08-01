@@ -1297,18 +1297,6 @@ async def list_matches(date: Optional[str] = None):
 
     rows = await db.matches.find(query, {"_id": 0}).sort("kickoff", 1).to_list(1000)
 
-    # إخفاء مباريات كأس العالم من تبويب المباريات فقط
-    rows = [
-        m for m in rows
-        if (
-            m.get("competition") != "worldcup"
-            and m.get("competition") != "world_cup"
-            and m.get("competition_id") != 1
-            and m.get("league_id") != 1
-            and (m.get("league") or {}).get("id") != 1
-        )
-    ]
-
     def norm(team):
         if not team:
             return ""
@@ -1566,37 +1554,6 @@ async def submit_competition_prediction(
     return await submit_prediction(prediction, user)
 
 
-
-
-
-
-@api_router.get("/competition/match-link/{fixture_id}")
-async def competition_match_link(fixture_id: str):
-    """
-    ربط مباراة البطولات بالمباراة الموجودة في جدول matches.
-    """
-
-    fixture = int(str(fixture_id).replace("fd:", ""))
-
-    match = await db.matches.find_one(
-        {
-            "external_fixture_id": fixture,
-        },
-        {
-            "_id": 0,
-            "id": 1,
-        },
-    )
-
-    if match:
-        return {
-            "found": True,
-            "match_id": match["id"],
-        }
-
-    return {
-        "found": False,
-    }
 
 
 @api_router.get(

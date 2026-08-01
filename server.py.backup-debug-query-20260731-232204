@@ -2,19 +2,9 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).parent
-
 load_dotenv(ROOT_DIR / '.env')
 
-
 import os
-
-
-API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
-API_FOOTBALL_BASE_URL = os.environ.get(
-    "API_FOOTBALL_BASE_URL",
-    "https://v3.football.api-sports.io",
-)
-CURRENT_API_FOOTBALL_SEASON = 2026
 import uuid
 import logging
 import bcrypt
@@ -1291,22 +1281,31 @@ async def get_teams():
 # ---------- Matches ----------
 @api_router.get("/matches", response_model=List[MatchModel])
 async def list_matches(date: Optional[str] = None):
-    query = {}
+    query = {
+        "competition": {
+            "$ne": "worldcup"
+        }
+    }
+
     if date:
         query["match_date"] = date
 
-    rows = await db.matches.find(query, {"_id": 0}).sort("kickoff", 1).to_list(1000)
+    rows = await db.matches.find(
+        {
+            "$or": [
+                {"competition": {"$exists": False}},
+                {"competition": None},
+                {"competition": {"$nin": ["worldcup", "world_cup"]}}
+            ],
+            **({"match_date": date} if date else {})
+        },
+        {"_id": 0}
+    ).sort("kickoff", 1).to_list(1000)
 
-    # إخفاء مباريات كأس العالم من تبويب المباريات فقط
+    # إخفاء مباريات كأس العالم من تبويب المباريات
     rows = [
         m for m in rows
-        if (
-            m.get("competition") != "worldcup"
-            and m.get("competition") != "world_cup"
-            and m.get("competition_id") != 1
-            and m.get("league_id") != 1
-            and (m.get("league") or {}).get("id") != 1
-        )
+        if "worldcup" not in str(m.get("competition", "")).lower()
     ]
 
     def norm(team):
@@ -1370,6 +1369,11 @@ async def list_matches(date: Optional[str] = None):
             continue
 
         result.append(m)
+
+    result = [
+        m for m in result
+        if "worldcup" not in str(m.get("competition", "")).lower()
+    ]
 
     return result
 
@@ -1566,37 +1570,6 @@ async def submit_competition_prediction(
     return await submit_prediction(prediction, user)
 
 
-
-
-
-
-@api_router.get("/competition/match-link/{fixture_id}")
-async def competition_match_link(fixture_id: str):
-    """
-    ربط مباراة البطولات بالمباراة الموجودة في جدول matches.
-    """
-
-    fixture = int(str(fixture_id).replace("fd:", ""))
-
-    match = await db.matches.find_one(
-        {
-            "external_fixture_id": fixture,
-        },
-        {
-            "_id": 0,
-            "id": 1,
-        },
-    )
-
-    if match:
-        return {
-            "found": True,
-            "match_id": match["id"],
-        }
-
-    return {
-        "found": False,
-    }
 
 
 @api_router.get(
@@ -4967,8 +4940,7 @@ async def get_competitions():
     )
 
     ALLOWED_LEAGUES = {
-        1,      # FIFA World Cup
-        2,      # UEFA Champions League
+                2,      # UEFA Champions League
         3,      # UEFA Europa League
         848,    # UEFA Europa Conference League
         39,     # Premier League
@@ -5680,10 +5652,9 @@ async def get_competition_matches(
     league_id: int,
     season: Optional[int] = None,
 ):
-    # إخفاء مباريات كأس العالم فقط
+    # إخفاء مباريات كأس العالم من تبويب البطولات
     if league_id == 1:
         return []
-
     season = await resolve_competition_season(
         league_id,
         season,

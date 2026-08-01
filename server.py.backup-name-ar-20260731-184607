@@ -2,19 +2,9 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).parent
-
 load_dotenv(ROOT_DIR / '.env')
 
-
 import os
-
-
-API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
-API_FOOTBALL_BASE_URL = os.environ.get(
-    "API_FOOTBALL_BASE_URL",
-    "https://v3.football.api-sports.io",
-)
-CURRENT_API_FOOTBALL_SEASON = 2026
 import uuid
 import logging
 import bcrypt
@@ -37,9 +27,6 @@ import asyncio
 import hashlib
 import json
 import httpx
-import re
-import unicodedata
-from difflib import SequenceMatcher
 import time
 
 # Firebase Cloud Messaging
@@ -354,27 +341,6 @@ TEAM_AR_NAMES = {
 
 
     "Deportivo Alavés": "ديبورتيفو ألافيس",
-
-    "FC Barcelona": "برشلونة",
-    "Real Madrid CF": "ريال مدريد",
-    "Club Atlético de Madrid": "أتلتيكو مدريد",
-    "Real Sociedad de Fútbol": "ريال سوسيداد",
-    "Real Betis Balompié": "ريال بيتيس",
-    "Valencia CF": "فالنسيا",
-    "Villarreal CF": "فياريال",
-    "RC Celta de Vigo": "سيلتا فيغو",
-    "RCD Espanyol de Barcelona": "إسبانيول",
-    "Athletic Club": "أتلتيك بلباو",
-    "CA Osasuna": "أوساسونا",
-    "Getafe CF": "خيتافي",
-    "Sevilla FC": "إشبيلية",
-    "Rayo Vallecano de Madrid": "رايو فاييكانو",
-    "Real Racing Club de Santander": "راسينغ سانتاندير",
-    "RC Deportivo La Coruña": "ديبورتيفو لاكورونيا",
-    "Levante UD": "ليفانتي",
-    "Elche CF": "إلتشي",
-    "Málaga CF": "مالقا",
-
     "Getafe CF": "خيتافي",
     "Sevilla FC": "إشبيلية",
     "Rayo Vallecano de Madrid": "رايو فاييكانو",
@@ -1297,18 +1263,6 @@ async def list_matches(date: Optional[str] = None):
 
     rows = await db.matches.find(query, {"_id": 0}).sort("kickoff", 1).to_list(1000)
 
-    # إخفاء مباريات كأس العالم من تبويب المباريات فقط
-    rows = [
-        m for m in rows
-        if (
-            m.get("competition") != "worldcup"
-            and m.get("competition") != "world_cup"
-            and m.get("competition_id") != 1
-            and m.get("league_id") != 1
-            and (m.get("league") or {}).get("id") != 1
-        )
-    ]
-
     def norm(team):
         if not team:
             return ""
@@ -1566,37 +1520,6 @@ async def submit_competition_prediction(
     return await submit_prediction(prediction, user)
 
 
-
-
-
-
-@api_router.get("/competition/match-link/{fixture_id}")
-async def competition_match_link(fixture_id: str):
-    """
-    ربط مباراة البطولات بالمباراة الموجودة في جدول matches.
-    """
-
-    fixture = int(str(fixture_id).replace("fd:", ""))
-
-    match = await db.matches.find_one(
-        {
-            "external_fixture_id": fixture,
-        },
-        {
-            "_id": 0,
-            "id": 1,
-        },
-    )
-
-    if match:
-        return {
-            "found": True,
-            "match_id": match["id"],
-        }
-
-    return {
-        "found": False,
-    }
 
 
 @api_router.get(
@@ -3646,7 +3569,7 @@ async def get_challenge_leaderboard(limit: int = 50):
 
 # وقت إغلاق توقع التحدي = بداية أول مباراة في دور الـ32
 # الافتراضي: الإثنين 29 يونيو 2026 الساعة 23:30 مكة = 20:30 UTC
-CHALLENGE_LOCK_AT = os.environ.get("CHALLENGE_LOCK_AT", "2026-07-18T21:00:00+00:00")
+CHALLENGE_LOCK_AT = os.environ.get("CHALLENGE_LOCK_AT", "2026-06-28T21:00:00+00:00")
 
 
 def _parse_challenge_lock_at():
@@ -4470,7 +4393,6 @@ def simplify_football_data_match(item, league_id, season):
                 "code": f"fd:{home.get('id')}",
                 "name": home.get("name"),
                 "name_en": home.get("name"),
-                "name_ar": team_ar_name(home.get("name")),
                 "logo": home.get("crest"),
             },
             "away": {
@@ -4478,7 +4400,6 @@ def simplify_football_data_match(item, league_id, season):
                 "code": f"fd:{away.get('id')}",
                 "name": away.get("name"),
                 "name_en": away.get("name"),
-                "name_ar": team_ar_name(away.get("name")),
                 "logo": away.get("crest"),
             },
         },
@@ -5680,10 +5601,6 @@ async def get_competition_matches(
     league_id: int,
     season: Optional[int] = None,
 ):
-    # إخفاء مباريات كأس العالم فقط
-    if league_id == 1:
-        return []
-
     season = await resolve_competition_season(
         league_id,
         season,
@@ -5751,9 +5668,9 @@ async def get_competition_scorers(
 
 FINAL_CHALLENGE_ID = "worldcup2026_final_awards"
 
-# 19 يوليو 2026 الساعة 22:00 بتوقيت مكة = 19:00 UTC
+# 14 يوليو 2026 الساعة 22:00 بتوقيت مكة = 19:00 UTC
 FINAL_CHALLENGE_CLOSE_AT = datetime(
-    2026, 7, 18, 21, 0, 0, tzinfo=timezone.utc
+    2026, 7, 14, 19, 0, 0, tzinfo=timezone.utc
 )
 
 FINAL_CHALLENGE_POINTS = {
@@ -5777,10 +5694,17 @@ class FinalChallengeResultsIn(BaseModel):
     top_scorer: str = Field(min_length=2, max_length=120)
 
 
-class FinalChallengeTamkeenVerifyIn(BaseModel):
-    verified: bool
+def final_challenge_is_closed():
+    return datetime.now(timezone.utc) >= FINAL_CHALLENGE_CLOSE_AT
 
 
+def normalize_final_challenge_phone(value):
+    value = str(value or "").strip()
+    return "".join(ch for ch in value if ch.isdigit())
+
+
+def normalize_final_challenge_answer(value):
+    return " ".join(str(value or "").strip().casefold().split())
 
 
 def calculate_final_challenge_score(entry, results):
@@ -5793,17 +5717,10 @@ def calculate_final_challenge_score(entry, results):
     }
 
     for key, points in FINAL_CHALLENGE_POINTS.items():
-        if key in ("best_player", "top_scorer"):
-            matched = final_challenge_player_name_matches(
-                entry.get(key),
-                results.get(key),
-            )
-        else:
-            predicted = normalize_final_challenge_answer(entry.get(key))
-            correct = normalize_final_challenge_answer(results.get(key))
-            matched = bool(predicted and correct and predicted == correct)
+        predicted = normalize_final_challenge_answer(entry.get(key))
+        correct = normalize_final_challenge_answer(results.get(key))
 
-        if matched:
+        if predicted and correct and predicted == correct:
             score += points
             details[key] = points
 
@@ -5830,15 +5747,7 @@ async def recalculate_final_challenge_scores():
     updated = 0
 
     for entry in entries:
-        if entry.get("tamkeen_verified", False):
-            score, details = calculate_final_challenge_score(entry, results)
-        else:
-            score = 0
-            details = {
-                "champion": 0,
-                "best_player": 0,
-                "top_scorer": 0,
-            }
+        score, details = calculate_final_challenge_score(entry, results)
 
         await db.final_challenge_entries.update_one(
             {"id": entry["id"]},
@@ -5862,7 +5771,7 @@ async def get_final_challenge_status():
         "challenge_id": FINAL_CHALLENGE_ID,
         "closed": final_challenge_is_closed(),
         "close_at": FINAL_CHALLENGE_CLOSE_AT.isoformat(),
-        "close_at_makkah": "2026-07-19T22:00:00+03:00",
+        "close_at_makkah": "2026-07-14T22:00:00+03:00",
         "points": FINAL_CHALLENGE_POINTS,
         "max_points": 20,
     }
@@ -5924,9 +5833,31 @@ async def save_final_challenge_entry(data: FinalChallengeEntryIn):
                 "best_player": 0,
                 "top_scorer": 0,
             },
-            "tamkeen_verified": False,
-            "tamkeen_verified_at": None,
-            "tamkeen_verified_by": None,
+            "created_at": now,
+        })
+
+        await db.final_challenge_entries.insert_one(doc)
+
+        message = "تم تثبيت توقعاتك بنجاح"
+
+    return {
+        "success": True,
+        "message": message,
+        "entry_id": entry_id,
+    }
+
+
+@api_router.get("/final-challenge/leaderboard")
+async def get_final_challenge_leaderboard():
+    entries = await db.final_challenge_entries.find(
+        {"challenge_id": FINAL_CHALLENGE_ID},
+        {
+            "_id": 0,
+            "id": 1,
+            "name": 1,
+            "score": 1,
+            "score_details": 1,
+            "created_at": 1,
         },
     ).sort([
         ("score", -1),
@@ -5949,13 +5880,22 @@ async def save_final_challenge_entry(data: FinalChallengeEntryIn):
             "name": entry.get("name"),
             "score": score,
             "score_details": entry.get("score_details", {}),
-            "tamkeen_verified": bool(entry.get("tamkeen_verified", False)),
-            "prize_eligible": bool(entry.get("tamkeen_verified", False)),
         })
 
         previous_score = score
 
     return leaderboard
+
+
+@api_router.get("/admin/final-challenge/entries")
+async def get_final_challenge_entries(
+    current_user=Depends(require_staff)
+):
+    return await db.final_challenge_entries.find(
+        {"challenge_id": FINAL_CHALLENGE_ID},
+        {"_id": 0},
+    ).sort("created_at", 1).to_list(100000)
+
 
 @api_router.post("/admin/final-challenge/results")
 async def set_final_challenge_results(
@@ -5990,38 +5930,6 @@ async def set_final_challenge_results(
         "message": "تم حفظ النتائج واحتساب نقاط التحدي",
         "updated_entries": updated,
         "results": results,
-    }
-
-
-@api_router.delete("/admin/final-challenge/results/reset")
-async def reset_final_challenge_results(
-    current_user=Depends(require_admin),
-):
-    now = datetime.now(timezone.utc).isoformat()
-
-    await db.final_challenge_results.delete_many(
-        {"challenge_id": FINAL_CHALLENGE_ID}
-    )
-
-    result = await db.final_challenge_entries.update_many(
-        {"challenge_id": FINAL_CHALLENGE_ID},
-        {
-            "$set": {
-                "score": 0,
-                "score_details": {
-                    "champion": 0,
-                    "best_player": 0,
-                    "top_scorer": 0,
-                },
-                "score_updated_at": now,
-            }
-        },
-    )
-
-    return {
-        "success": True,
-        "message": "تم تصفير نتائج ونقاط التحدي بنجاح",
-        "reset_entries": result.modified_count,
     }
 
 
@@ -6067,12 +5975,3 @@ async def fix_corrupted_fields():
         print(f"✅ تم إصلاح وتصحيح مواعيد {result.modified_count} مباراة في قاعدة البيانات!")
     except Exception as e:
         print("خطأ أثناء إصلاح قاعدة البيانات:", e)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=False,
-    )
