@@ -1502,6 +1502,67 @@ async def set_match_result(match_id: str, data: MatchResultIn, _staff=Depends(re
 
 
 
+
+import re
+from datetime import timedelta
+
+def normalize_match_team_name(value: str | None) -> str:
+    if not value:
+        return ""
+
+    value = team_ar_name(str(value))
+    value = value.lower()
+
+    value = re.sub(r"\b(fc|cf|club|sc|ac)\b", " ", value)
+    value = value.replace("-", " ")
+    value = value.replace("_", " ")
+    value = value.replace(".", " ")
+    value = re.sub(r"\s+", " ", value)
+
+    return value.strip()
+
+
+async def find_existing_admin_match(data: CompetitionPredictionIn):
+
+    kickoff = _parse_dt(data.kickoff)
+
+    if not kickoff:
+        return None
+
+    start = (kickoff - timedelta(hours=1)).replace(
+        tzinfo=None
+    ).isoformat(timespec="minutes")
+
+    end = (kickoff + timedelta(hours=1)).replace(
+        tzinfo=None
+    ).isoformat(timespec="minutes")
+
+    candidates = await db.matches.find(
+        {
+            "competition": {"$ne": "worldcup"},
+            "kickoff": {
+                "$gte": start,
+                "$lte": end,
+            },
+        },
+        {"_id": 0},
+    ).to_list(100)
+
+    wanted_home = normalize_match_team_name(data.home_team)
+    wanted_away = normalize_match_team_name(data.away_team)
+
+    for match in candidates:
+
+        home = normalize_match_team_name(match.get("home_team"))
+        away = normalize_match_team_name(match.get("away_team"))
+
+        if home == wanted_home and away == wanted_away:
+            return match
+
+    return None
+
+
+
 async def ensure_competition_match(data: CompetitionPredictionIn):
     existing = await db.matches.find_one(
         {
@@ -1513,6 +1574,30 @@ async def ensure_competition_match(data: CompetitionPredictionIn):
 
     if existing:
         return existing
+
+    admin_match = await find_existing_admin_match(data)
+
+    if admin_match:
+
+        await db.matches.update_one(
+            {"id": admin_match["id"]},
+            {
+                "$set": {
+                    "external_provider": data.external_provider,
+                    "external_fixture_id": int(str(data.fixture_id).replace("fd:", "")),
+                    "league_id": data.league_id,
+                    "league_name_en": data.league_name_en,
+                    "league_name_ar": data.league_name_ar,
+                }
+            },
+        )
+
+        admin_match["external_provider"] = data.external_provider
+        admin_match["external_fixture_id"] = int(
+            str(data.fixture_id).replace("fd:", "")
+        )
+
+        return admin_match
 
     match = {
         "id": str(uuid.uuid4()),
