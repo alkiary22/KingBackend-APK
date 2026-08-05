@@ -1522,12 +1522,15 @@ def normalize_match_team_name(value: str | None) -> str:
     return value.strip()
 
 
+
 async def find_existing_admin_match(data: CompetitionPredictionIn):
 
     kickoff = _parse_dt(data.kickoff)
 
     if not kickoff:
         return None
+
+    from datetime import timedelta
 
     start = (kickoff - timedelta(hours=1)).replace(
         tzinfo=None
@@ -1539,24 +1542,60 @@ async def find_existing_admin_match(data: CompetitionPredictionIn):
 
     candidates = await db.matches.find(
         {
-            "competition": {"$ne": "worldcup"},
-            "kickoff": {
-                "$gte": start,
-                "$lte": end,
+            "competition": {"$ne":"worldcup"},
+            "kickoff":{
+                "$gte":start,
+                "$lte":end,
             },
         },
-        {"_id": 0},
-    ).to_list(100)
+        {"_id":0},
+    ).to_list(300)
 
-    wanted_home = normalize_match_team_name(data.home_team)
-    wanted_away = normalize_match_team_name(data.away_team)
+    wanted_home_en = normalize_match_team_name(data.home_team)
+    wanted_home_ar = normalize_match_team_name(team_ar_name(data.home_team))
+
+    wanted_away_en = normalize_match_team_name(data.away_team)
+    wanted_away_ar = normalize_match_team_name(team_ar_name(data.away_team))
 
     for match in candidates:
 
-        home = normalize_match_team_name(match.get("home_team"))
-        away = normalize_match_team_name(match.get("away_team"))
+        home_code = match.get("home_team")
+        away_code = match.get("away_team")
 
-        if home == wanted_home and away == wanted_away:
+        home_names=[]
+        away_names=[]
+
+        if isinstance(home_code,str) and home_code.startswith("af:"):
+            team=await db.football_teams.find_one(
+                {"code":home_code},
+                {"_id":0,"name_en":1,"name_ar":1},
+            )
+            if team:
+                home_names.extend([
+                    normalize_match_team_name(team.get("name_en")),
+                    normalize_match_team_name(team.get("name_ar")),
+                ])
+        else:
+            home_names.append(normalize_match_team_name(home_code))
+
+        if isinstance(away_code,str) and away_code.startswith("af:"):
+            team=await db.football_teams.find_one(
+                {"code":away_code},
+                {"_id":0,"name_en":1,"name_ar":1},
+            )
+            if team:
+                away_names.extend([
+                    normalize_match_team_name(team.get("name_en")),
+                    normalize_match_team_name(team.get("name_ar")),
+                ])
+        else:
+            away_names.append(normalize_match_team_name(away_code))
+
+        if (
+            (wanted_home_en in home_names or wanted_home_ar in home_names)
+            and
+            (wanted_away_en in away_names or wanted_away_ar in away_names)
+        ):
             return match
 
     return None
