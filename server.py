@@ -1734,7 +1734,11 @@ async def submit_competition_prediction(
 @api_router.get("/competition/match-link/{fixture_id}")
 async def competition_match_link(fixture_id: str):
     """
-    ربط مباراة البطولات بالمباراة الموجودة في جدول matches.
+    ربط مباراة البطولات بالمباراة الموجودة في db.matches.
+
+    الأولوية:
+    1- external_fixture_id
+    2- مطابقة الاسم العربي/الإنجليزي + تاريخ المباراة
     """
 
     fixture = int(str(fixture_id).replace("fd:", ""))
@@ -1755,10 +1759,97 @@ async def competition_match_link(fixture_id: str):
             "match_id": match["id"],
         }
 
+    fixture_item = None
+
+    cursor = db.competition_data.find(
+        {
+            "kind": "matches",
+        },
+        {
+            "_id": 0,
+            "items": 1,
+        },
+    )
+
+    async for doc in cursor:
+        for item in doc.get("items") or []:
+            if item.get("external_fixture_id") == fixture:
+                fixture_item = item
+                break
+        if fixture_item:
+            break
+
+    if not fixture_item:
+        return {"found": False}
+
+    teams = fixture_item.get("teams") or {}
+
+    home = teams.get("home") or {}
+    away = teams.get("away") or {}
+
+    home_names = {
+        normalize_match_team_name(home.get("name")),
+        normalize_match_team_name(home.get("name_en")),
+        normalize_match_team_name(home.get("name_ar")),
+    }
+
+    away_names = {
+        normalize_match_team_name(away.get("name")),
+        normalize_match_team_name(away.get("name_en")),
+        normalize_match_team_name(away.get("name_ar")),
+    }
+
+    home_names.discard("")
+    away_names.discard("")
+
+    match_date = str(
+        fixture_item.get("kickoff_utc")
+        or fixture_item.get("match_date")
+        or ""
+    )[:10]
+
+    cursor = db.matches.find({}, {"_id": 0})
+
+    async for db_match in cursor:
+
+        if str(db_match.get("match_date", ""))[:10] != match_date:
+            continue
+
+        home_team = await db.football_teams.find_one(
+            {"code": db_match.get("home_team")},
+            {"_id": 0},
+        )
+
+        away_team = await db.football_teams.find_one(
+            {"code": db_match.get("away_team")},
+            {"_id": 0},
+        )
+
+        if not home_team or not away_team:
+            continue
+
+        db_home = {
+            normalize_match_team_name(home_team.get("name_en")),
+            normalize_match_team_name(home_team.get("name_ar")),
+        }
+
+        db_away = {
+            normalize_match_team_name(away_team.get("name_en")),
+            normalize_match_team_name(away_team.get("name_ar")),
+        }
+
+        db_home.discard("")
+        db_away.discard("")
+
+        if (home_names & db_home) and (away_names & db_away):
+            return {
+                "found": True,
+                "match_id": db_match["id"],
+            }
+
     return {
         "found": False,
     }
-
 
 @api_router.get(
     "/competition/predictions/stats/{fixture_id}",
