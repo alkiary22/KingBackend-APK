@@ -1413,8 +1413,16 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
         "away_score": None,
         "status": "scheduled",
     }
-    await db.matches.insert_one(match.copy())
-    return match
+    try:
+        await db.matches.insert_one(match.copy())
+        return match
+    except Exception as e:
+        import traceback
+        print("=" * 80)
+        print("CREATE MATCH ERROR")
+        print(traceback.format_exc())
+        print("=" * 80)
+        raise
 
 
 @api_router.put("/matches/{match_id}", response_model=MatchModel)
