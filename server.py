@@ -908,6 +908,9 @@ class MatchModel(BaseModel):
     status: Literal["scheduled", "finished"] = "scheduled"
     result_updated_at: Optional[str] = None
     result_source: Optional[str] = None
+
+    home: Optional[TeamModel] = None
+    away: Optional[TeamModel] = None
     # إضافات اختيارية لمباريات API-Football
     external_provider: Optional[str] = None
     external_fixture_id: Optional[int] = None
