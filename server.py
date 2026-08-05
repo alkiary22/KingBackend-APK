@@ -1381,11 +1381,16 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
     # السماح بجميع الفرق التي يعرضها /teams للإدارة
     available_teams = await get_teams()
 
-    codes = {
-        team.code
-        for team in available_teams
-        if team.code
-    }
+    codes = set()
+
+    for team in available_teams:
+        if isinstance(team, dict):
+            code = team.get("code")
+        else:
+            code = team.code
+
+        if code:
+            codes.add(code)
 
     if data.home_team not in codes:
         raise HTTPException(
