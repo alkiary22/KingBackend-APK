@@ -1338,6 +1338,9 @@ async def list_matches(date: Optional[str] = None):
         }
         return mapping.get(t, t)
 
+    teams = await get_teams()
+    teams_map = {t["code"]: t for t in teams}
+
     result = []
     manual_keys = set()
 
@@ -1353,6 +1356,15 @@ async def list_matches(date: Optional[str] = None):
         )
 
         manual_keys.add(key)
+        home = teams_map.get(m.get("home_team"))
+        away = teams_map.get(m.get("away_team"))
+
+        if home:
+            m["home"] = home
+
+        if away:
+            m["away"] = away
+
         result.append(m)
 
     # أضف الخارجية إذا لم توجد نسخة يدوية
@@ -1368,6 +1380,15 @@ async def list_matches(date: Optional[str] = None):
 
         if key in manual_keys:
             continue
+
+        home = teams_map.get(m.get("home_team"))
+        away = teams_map.get(m.get("away_team"))
+
+        if home:
+            m["home"] = home
+
+        if away:
+            m["away"] = away
 
         result.append(m)
 
