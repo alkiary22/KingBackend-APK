@@ -24,10 +24,24 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
+
+# ---- Pydantic v1/v2 compatibility: model_dump ----
+# Pydantic v2 has .model_dump(), Pydantic v1 uses .dict()
+try:
+    _has_model_dump = hasattr(BaseModel, 'model_dump')
+except Exception:
+    _has_model_dump = False
+
+if not _has_model_dump:
+    def model_dump(self, *args, **kwargs):
+        return self.dict(*args, **kwargs)
+    BaseModel.model_dump = model_dump  # type: ignore[attr-defined]
+
 
 from teams_data import WORLD_CUP_TEAMS
 from fixtures_data import GROUP_FIXTURES, GROUP_LABEL
@@ -819,6 +833,20 @@ JWT_EXPIRE_DAYS = 30
 
 # ---------- App ----------
 app = FastAPI(title="ملك التوقعات API")
+
+# ---- CORS (dev) ----
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---- CORS (dev/local) ----
+# Allow frontend dev server (localhost/127.0.0.1 on any port).
+
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer(auto_error=False)
 
@@ -876,6 +904,8 @@ class MatchCreate(BaseModel):
     competition: str = "worldcup"
     stage: str = "مرحلة المجموعات"
     group_name: Optional[str] = None
+    external_provider: Optional[str] = None
+    external_fixture_id: Optional[str] = None  # accepts "fd:564628" or "564628"
 
 
 class MatchUpdate(BaseModel):
@@ -886,6 +916,8 @@ class MatchUpdate(BaseModel):
     competition: Optional[str] = None
     stage: Optional[str] = None
     group_name: Optional[str] = None
+    external_provider: Optional[str] = None
+    external_fixture_id: Optional[str] = None  # accepts "fd:564628" or "564628"
 
 
 class MatchResultIn(BaseModel):
@@ -908,6 +940,9 @@ class MatchModel(BaseModel):
     status: Literal["scheduled", "finished"] = "scheduled"
     result_updated_at: Optional[str] = None
     result_source: Optional[str] = None
+
+    home: Optional[TeamModel] = None
+    away: Optional[TeamModel] = None
 
     home: Optional[TeamModel] = None
     away: Optional[TeamModel] = None
@@ -1228,7 +1263,18 @@ async def get_teams():
     def add_team(team):
         code = team.get("code")
 
-        if not code or code in seen_codes:
+        if not code:
+            return
+
+        if code in seen_codes:
+            # fill missing fields (logo) if exists from another source
+            for t in merged:
+                if t.get('code') == code:
+                    if (not t.get('logo')) and team.get('logo'):
+                        t['logo'] = team.get('logo')
+                    if (not t.get('api_football_team_id')) and team.get('api_football_team_id'):
+                        t['api_football_team_id'] = team.get('api_football_team_id')
+                    return
             return
 
         merged.append({
@@ -1268,7 +1314,7 @@ async def get_teams():
                 ),
                 "name_en": team.get("name_en") or team.get("name"),
                 "confederation": "API-Football",
-                "logo": team.get("logo"),
+                "logo": team.get("logo") or f"https://media.api-sports.io/football/teams/{int(team_id)}.png",
                 "type": "club",
                 "api_football_team_id": int(team_id),
             })
@@ -1442,6 +1488,20 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
         "away_score": None,
         "status": "scheduled",
     }
+    # Optional linking to competition fixture (best practice to prevent duplicates)
+    if getattr(data, 'external_fixture_id', None):
+        raw = str(data.external_fixture_id).strip()
+        provider = (getattr(data, 'external_provider', None) or '').strip() or None
+        if ':' in raw:
+            maybe_provider, tail = raw.split(':', 1)
+            if (not provider) and maybe_provider.strip():
+                provider = maybe_provider.strip()
+            raw = tail.strip()
+        if not raw.isdigit():
+            raise HTTPException(status_code=400, detail='external_fixture_id غير صالح')
+        match['external_fixture_id'] = int(raw)
+        match['external_provider'] = provider or 'fd'
+
     try:
         await db.matches.insert_one(match.copy())
         return match
@@ -1460,6 +1520,20 @@ async def update_match(match_id: str, data: MatchUpdate, _staff=Depends(require_
     if not match:
         raise HTTPException(status_code=404, detail="المباراة غير موجودة")
     updates = {k: v for k, v in data.model_dump(exclude_none=True).items()}
+    # normalize external_fixture_id if provided (accepts 'fd:564628' or '564628')
+    if 'external_fixture_id' in updates:
+        raw = str(updates.get('external_fixture_id') or '').strip()
+        provider = (updates.get('external_provider') or match.get('external_provider') or '').strip() or None
+        if ':' in raw:
+            maybe_provider, tail = raw.split(':', 1)
+            if (not provider) and maybe_provider.strip():
+                provider = maybe_provider.strip()
+            raw = tail.strip()
+        if not raw.isdigit():
+            raise HTTPException(status_code=400, detail='external_fixture_id غير صالح')
+        updates['external_fixture_id'] = int(raw)
+        updates['external_provider'] = provider or 'fd'
+
     # keep legacy compatibility: update kickoff_utc whenever kickoff updated
     if "kickoff" in updates and "kickoff_utc" not in updates:
         updates["kickoff_utc"] = updates["kickoff"]
@@ -1524,83 +1598,75 @@ def normalize_match_team_name(value: str | None) -> str:
 
 
 async def find_existing_admin_match(data: CompetitionPredictionIn):
+    """
+    Try to find a manually-created match (admin match) that corresponds to the
+    incoming competition fixture, even if it has no external_fixture_id yet.
+    This prevents creating duplicate matches.
+    """
+    # Prefer matching by teams + match_date (+ competition if provided).
+    base_query = {
+        "home_team": data.home_team,
+        "away_team": data.away_team,
+        "match_date": data.match_date,
+    }
 
-    kickoff = _parse_dt(data.kickoff)
+    # Only consider matches that are not already linked to an external fixture (best signal for 'manual').
+    manual_filter = {
+        "$or": [
+            {"external_fixture_id": {"$exists": False}},
+            {"external_fixture_id": None},
+        ]
+    }
 
-    if not kickoff:
+    # 1) strict: teams + date + competition + manual-only
+    q1 = dict(base_query)
+    if getattr(data, "competition", None):
+        q1["competition"] = data.competition
+    q1.update(manual_filter)
+
+    candidates = await db.matches.find(q1, {"_id": 0}).to_list(50)
+
+    # 2) relaxed: teams + date + manual-only
+    if not candidates:
+        q2 = dict(base_query)
+        q2.update(manual_filter)
+        candidates = await db.matches.find(q2, {"_id": 0}).to_list(50)
+
+    # 3) relaxed more: teams + date (even if already linked) - last resort
+    if not candidates:
+        candidates = await db.matches.find(base_query, {"_id": 0}).to_list(50)
+
+    if not candidates:
         return None
 
-    from datetime import timedelta
+    if len(candidates) == 1:
+        return candidates[0]
 
-    start = (kickoff - timedelta(hours=1)).replace(
-        tzinfo=None
-    ).isoformat(timespec="minutes")
+    # If multiple, choose the closest kickoff time (if parseable).
+    try:
+        target = datetime.fromisoformat(str(data.kickoff).replace("Z", "+00:00"))
+    except Exception:
+        target = None
 
-    end = (kickoff + timedelta(hours=1)).replace(
-        tzinfo=None
-    ).isoformat(timespec="minutes")
+    if target:
+        best = None
+        best_diff = None
+        for m in candidates:
+            try:
+                k = datetime.fromisoformat(str(m.get("kickoff", "")).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            diff = abs((k - target).total_seconds())
+            if best is None or diff < best_diff:
+                best = m
+                best_diff = diff
 
-    candidates = await db.matches.find(
-        {
-            "competition": {"$ne":"worldcup"},
-            "kickoff":{
-                "$gte":start,
-                "$lte":end,
-            },
-        },
-        {"_id":0},
-    ).to_list(300)
+        # Only accept if within 8 hours to avoid wrong linking
+        if best is not None and best_diff is not None and best_diff <= 8 * 3600:
+            return best
 
-    wanted_home_en = normalize_match_team_name(data.home_team)
-    wanted_home_ar = normalize_match_team_name(team_ar_name(data.home_team))
-
-    wanted_away_en = normalize_match_team_name(data.away_team)
-    wanted_away_ar = normalize_match_team_name(team_ar_name(data.away_team))
-
-    for match in candidates:
-
-        home_code = match.get("home_team")
-        away_code = match.get("away_team")
-
-        home_names=[]
-        away_names=[]
-
-        if isinstance(home_code,str) and home_code.startswith("af:"):
-            team=await db.football_teams.find_one(
-                {"code":home_code},
-                {"_id":0,"name_en":1,"name_ar":1},
-            )
-            if team:
-                home_names.extend([
-                    normalize_match_team_name(team.get("name_en")),
-                    normalize_match_team_name(team.get("name_ar")),
-                ])
-        else:
-            home_names.append(normalize_match_team_name(home_code))
-
-        if isinstance(away_code,str) and away_code.startswith("af:"):
-            team=await db.football_teams.find_one(
-                {"code":away_code},
-                {"_id":0,"name_en":1,"name_ar":1},
-            )
-            if team:
-                away_names.extend([
-                    normalize_match_team_name(team.get("name_en")),
-                    normalize_match_team_name(team.get("name_ar")),
-                ])
-        else:
-            away_names.append(normalize_match_team_name(away_code))
-
-        if (
-            (wanted_home_en in home_names or wanted_home_ar in home_names)
-            and
-            (wanted_away_en in away_names or wanted_away_ar in away_names)
-        ):
-            return match
-
+    # Could not disambiguate safely
     return None
-
-
 
 async def ensure_competition_match(data: CompetitionPredictionIn):
     existing = await db.matches.find_one(
@@ -1666,42 +1732,115 @@ async def ensure_competition_match(data: CompetitionPredictionIn):
 # ---------- Predictions ----------
 @api_router.post("/predictions", response_model=PredictionModel)
 async def submit_prediction(data: PredictionIn, user=Depends(get_current_user)):
-    match = await db.matches.find_one({"id": data.match_id}, {"_id": 0})
+    """
+    Accepts internal match id (uuid) OR external fixture id like "fd:564628".
+    Always stores predictions using the INTERNAL match id to prevent duplicates.
+    """
+    raw_match_id = str(data.match_id)
+
+    import re as _re
+    def _normalize_fixture_id(s: str):
+        if not s:
+            return None
+        s = str(s).strip()
+        if s.startswith("fd:"):
+            tail = s.split(":", 1)[1].strip()
+            return int(tail) if tail.isdigit() else None
+        if s.isdigit():
+            return int(s)
+        return None
+
+    # 1) Resolve match (internal id OR external fixture id)
+    match = await db.matches.find_one({"id": raw_match_id}, {"_id": 0})
+    resolved_match_id = raw_match_id
+
     if not match:
-        raise HTTPException(status_code=404, detail="المباراة غير موجودة")
+        ext_id = _normalize_fixture_id(raw_match_id)
+        if ext_id is not None:
+            match = await db.matches.find_one(
+                {
+                    "$or": [
+                        {"external_fixture_id": int(ext_id)},
+                        {"external_fixture_id": str(int(ext_id))},
+                        {"fixture_id": int(ext_id)},
+                        {"fixture_id": str(int(ext_id))},
+                        {"api_fixture_id": int(ext_id)},
+                        {"api_fixture_id": str(int(ext_id))},
+                    ]
+                },
+                {"_id": 0},
+            )
+            if match:
+                resolved_match_id = match["id"]
+
+    if not match:
+        raise HTTPException(status_code=404, detail="المباراة غير موجودة أو غير مضافة للتوقعات")
+
+    # 2) Block predictions after finish / kickoff
     if match.get("status") == "finished":
         raise HTTPException(status_code=400, detail="انتهت المباراة، التوقعات مغلقة")
-    # Lock predictions after kickoff
+
     try:
         kickoff_dt = datetime.fromisoformat(match["kickoff"].replace("Z", "+00:00"))
+        if kickoff_dt.tzinfo is None:
+            kickoff_dt = kickoff_dt.replace(tzinfo=timezone.utc)
         if kickoff_dt <= datetime.now(timezone.utc):
             raise HTTPException(status_code=400, detail="بدأت المباراة، التوقعات مغلقة")
     except ValueError:
         pass
 
-    existing = await db.predictions.find_one(
-        {"match_id": data.match_id, "user_id": user["id"]}, {"_id": 0}
-    )
     now = datetime.now(timezone.utc).isoformat()
-    if existing:
+
+    # 3) Find existing prediction by either legacy raw id OR resolved internal id
+    ids = []
+    for x in (raw_match_id, resolved_match_id):
+        if x and x not in ids:
+            ids.append(x)
+
+    preds = await db.predictions.find(
+        {"user_id": user["id"], "match_id": {"$in": ids}},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(10)
+
+    if preds:
+        keep = preds[0]
+
+        # Remove duplicates if exist (two predictions for same user+match due to id mismatch)
+        if len(preds) > 1:
+            dup_ids = [pp.get("id") for pp in preds[1:] if pp.get("id")]
+            if dup_ids:
+                await db.predictions.delete_many({"id": {"$in": dup_ids}})
+
+        # Update + migrate match_id to internal id
         await db.predictions.update_one(
-            {"id": existing["id"]},
-            {"$set": {"home_score": data.home_score, "away_score": data.away_score, "created_at": now}},
+            {"id": keep["id"]},
+            {
+                "$set": {
+                    "match_id": resolved_match_id,
+                    "home_score": data.home_score,
+                    "away_score": data.away_score,
+                    # keep old behavior (created_at is used as last update in your sorting)
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            },
         )
-        out = await db.predictions.find_one({"id": existing["id"]}, {"_id": 0})
+        out = await db.predictions.find_one({"id": keep["id"]}, {"_id": 0})
         return out
+
+    # 4) Create new prediction (always with internal match id)
     pred = {
         "id": str(uuid.uuid4()),
-        "match_id": data.match_id,
+        "match_id": resolved_match_id,
         "user_id": user["id"],
         "home_score": data.home_score,
         "away_score": data.away_score,
         "points": None,
         "created_at": now,
+        "updated_at": now,
     }
     await db.predictions.insert_one(pred.copy())
     return pred
-
 
 @api_router.get("/predictions/me", response_model=List[PredictionModel])
 async def my_predictions(user=Depends(get_current_user)):
@@ -2624,6 +2763,8 @@ async def admin_api_football_import_fixtures(data: AFImportFixturesIn, _staff=De
         round_ar = translate_round_ar(round_en)
 
         base_doc = {
+            "id": match_id,
+            "external_fixture_id": int(fixture_id_int),
             "home_team": home_code,
             "away_team": away_code,
             "match_date": match_date_mecca,
@@ -2664,19 +2805,21 @@ async def admin_api_football_import_fixtures(data: AFImportFixturesIn, _staff=De
             set_doc.pop("home_score", None)
             set_doc.pop("away_score", None)
 
-        match_ops.append(
-            UpdateOne(
-                {"external_fixture_id": int(fixture_id_int)},
-                {
-                    "$set": set_doc,
-                    "$setOnInsert": {
-                        "id": match_id,
-                        "created_at": now_iso,
-                    },
-                },
-                upsert=True,
-            )
-        )
+        if existing is None:
+            if not existing:
+                match_ops.append(
+                    UpdateOne(
+                        {"external_fixture_id": int(fixture_id_int)},
+                        {
+                            "$set": set_doc,
+                            "$setOnInsert": {
+                                "id": match_id,
+                                "created_at": now_iso,
+                            },
+                        },
+                        upsert=True,
+                    )
+                )
 
         # تجميع النتائج المنتهية لتطبيقها بعد انتهاء bulk_write فقط
         if (not existing_finished) and (status_short in API_FOOTBALL_FINISHED_SHORT):
@@ -6296,13 +6439,6 @@ async def get_final_challenge_results(
 
 app.include_router(api_router)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=False,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
