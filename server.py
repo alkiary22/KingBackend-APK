@@ -906,6 +906,13 @@ class MatchCreate(BaseModel):
     group_name: Optional[str] = None
     external_provider: Optional[str] = None
     external_fixture_id: Optional[str] = None  # accepts "fd:564628" or "564628"
+    # optional team meta (used to auto-create teams if code like fd:xxx not in /teams)
+    home_team_name_ar: Optional[str] = None
+    home_team_name_en: Optional[str] = None
+    home_team_logo: Optional[str] = None
+    away_team_name_ar: Optional[str] = None
+    away_team_name_en: Optional[str] = None
+    away_team_logo: Optional[str] = None
 
 
 class MatchUpdate(BaseModel):
@@ -918,6 +925,13 @@ class MatchUpdate(BaseModel):
     group_name: Optional[str] = None
     external_provider: Optional[str] = None
     external_fixture_id: Optional[str] = None  # accepts "fd:564628" or "564628"
+    # optional team meta (used to auto-create teams if code like fd:xxx not in /teams)
+    home_team_name_ar: Optional[str] = None
+    home_team_name_en: Optional[str] = None
+    home_team_logo: Optional[str] = None
+    away_team_name_ar: Optional[str] = None
+    away_team_name_en: Optional[str] = None
+    away_team_logo: Optional[str] = None
 
 
 class MatchResultIn(BaseModel):
@@ -1462,6 +1476,91 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
         if code:
             codes.add(code)
 
+
+    # --- auto-add missing fd teams ---
+    # When adding fixtures from competitions, team codes can be like "fd:80".
+    # If not present in /api/teams, we create them automatically in db.teams using provided names/logos.
+    async def _ensure_fd_team(code: str, name_ar=None, name_en=None, logo=None):
+        code = (code or "").strip()
+        if not code:
+            return
+        if code in codes:
+            return
+        if not code.startswith("fd:"):
+            return
+        doc = {
+            "code": code,
+            "name_ar": (name_ar or name_en or code),
+            "name_en": (name_en or name_ar or code),
+            "confederation": "N/A",
+            "logo": logo,
+            "type": "club",
+        }
+        await db.teams.update_one({"code": code}, {"$set": doc}, upsert=True)
+        codes.add(code)
+
+    await _ensure_fd_team(
+        data.home_team,
+        getattr(data, "home_team_name_ar", None),
+        getattr(data, "home_team_name_en", None),
+        getattr(data, "home_team_logo", None),
+    )
+    await _ensure_fd_team(
+        data.away_team,
+        getattr(data, "away_team_name_ar", None),
+        getattr(data, "away_team_name_en", None),
+        getattr(data, "away_team_logo", None),
+    )
+
+
+    # --- auto-create missing teams (from competitions) ---
+    # If admin imports a match whose team code isn't in /api/teams OR is missing logo/name,
+    # update it using provided meta (names/logos). This fixes "names show but logos missing".
+    async def _ensure_team(code: str, name_ar=None, name_en=None, logo=None):
+        code = (code or "").strip()
+        if not code:
+            return
+
+        # only update if we have at least some metadata
+        if not (name_ar or name_en or logo):
+            return
+
+        update_set = {}
+        if name_ar:
+            update_set["name_ar"] = name_ar
+        if name_en:
+            update_set["name_en"] = name_en
+        if logo:
+            update_set["logo"] = logo
+
+        # do not overwrite these on existing docs
+        set_on_insert = {
+            "code": code,
+            "confederation": "Imported",
+            "type": "club",
+        }
+
+        await db.teams.update_one(
+            {"code": code},
+            {"$set": update_set, "$setOnInsert": set_on_insert},
+            upsert=True,
+        )
+
+        codes.add(code)
+
+    await _ensure_team(
+        data.home_team,
+        getattr(data, "home_team_name_ar", None),
+        getattr(data, "home_team_name_en", None),
+        getattr(data, "home_team_logo", None),
+    )
+    await _ensure_team(
+        data.away_team,
+        getattr(data, "away_team_name_ar", None),
+        getattr(data, "away_team_name_en", None),
+        getattr(data, "away_team_logo", None),
+    )
+
     if data.home_team not in codes:
         raise HTTPException(
             status_code=400,
@@ -1501,6 +1600,19 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
             raise HTTPException(status_code=400, detail='external_fixture_id غير صالح')
         match['external_fixture_id'] = int(raw)
         match['external_provider'] = provider or 'fd'
+
+        # --- dedupe match by external_fixture_id ---
+        # If the same fixture is added again from competitions, return the existing match (no duplicates).
+        existing = await db.matches.find_one(
+            {
+                "external_fixture_id": match.get("external_fixture_id"),
+                "external_provider": match.get("external_provider", "fd"),
+            },
+            {"_id": 0},
+        )
+        if existing:
+            return existing
+
 
     try:
         await db.matches.insert_one(match.copy())
@@ -1791,7 +1903,9 @@ async def submit_prediction(data: PredictionIn, user=Depends(get_current_user)):
 
     now = datetime.now(timezone.utc).isoformat()
 
-    # 3) Find existing prediction by either legacy raw id OR resolved internal id
+    
+    # --- upsert prediction per user+match ---
+    # 3) Keep a single prediction per (user_id + internal match_id). Also migrate legacy ids.
     ids = []
     for x in (raw_match_id, resolved_match_id):
         if x and x not in ids:
@@ -1800,47 +1914,47 @@ async def submit_prediction(data: PredictionIn, user=Depends(get_current_user)):
     preds = await db.predictions.find(
         {"user_id": user["id"], "match_id": {"$in": ids}},
         {"_id": 0},
-    ).sort("created_at", -1).to_list(10)
+    ).sort("created_at", -1).to_list(20)
 
     if preds:
         keep = preds[0]
-
-        # Remove duplicates if exist (two predictions for same user+match due to id mismatch)
+        # delete duplicates
         if len(preds) > 1:
             dup_ids = [pp.get("id") for pp in preds[1:] if pp.get("id")]
             if dup_ids:
                 await db.predictions.delete_many({"id": {"$in": dup_ids}})
 
-        # Update + migrate match_id to internal id
-        await db.predictions.update_one(
-            {"id": keep["id"]},
-            {
-                "$set": {
-                    "match_id": resolved_match_id,
-                    "home_score": data.home_score,
-                    "away_score": data.away_score,
-                    # keep old behavior (created_at is used as last update in your sorting)
-                    "created_at": now,
-                    "updated_at": now,
-                }
-            },
-        )
-        out = await db.predictions.find_one({"id": keep["id"]}, {"_id": 0})
-        return out
+        # migrate kept doc to internal match id
+        if keep.get("match_id") != resolved_match_id:
+            await db.predictions.update_one(
+                {"id": keep["id"]},
+                {"$set": {"match_id": resolved_match_id}},
+            )
 
-    # 4) Create new prediction (always with internal match id)
-    pred = {
-        "id": str(uuid.uuid4()),
-        "match_id": resolved_match_id,
-        "user_id": user["id"],
-        "home_score": data.home_score,
-        "away_score": data.away_score,
-        "points": None,
-        "created_at": now,
-        "updated_at": now,
-    }
-    await db.predictions.insert_one(pred.copy())
-    return pred
+    # 4) Upsert on canonical key (no duplicates)
+    filter_q = {"user_id": user["id"], "match_id": resolved_match_id}
+    await db.predictions.update_one(
+        filter_q,
+        {
+            "$set": {
+                "home_score": data.home_score,
+                "away_score": data.away_score,
+                "points": None,
+                # keep your legacy behavior: created_at is treated like "last updated" for sorting
+                "created_at": now,
+                "updated_at": now,
+            },
+            "$setOnInsert": {
+                "id": str(uuid.uuid4()),
+                "user_id": user["id"],
+                "match_id": resolved_match_id,
+            },
+        },
+        upsert=True,
+    )
+    out = await db.predictions.find_one(filter_q, {"_id": 0})
+    return out
+
 
 @api_router.get("/predictions/me", response_model=List[PredictionModel])
 async def my_predictions(user=Depends(get_current_user)):
