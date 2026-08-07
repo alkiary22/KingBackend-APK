@@ -50,6 +50,7 @@ from content_defaults import DEFAULT_CONTENT
 import asyncio
 import hashlib
 import json
+import requests
 import httpx
 import re
 import unicodedata
@@ -1143,56 +1144,107 @@ async def login(data: LoginIn):
     return {"user": user_to_public(user), "token": token}
 
 
+
+def _verify_google_id_token_via_firebase_rest(id_token: str) -> dict:
+    """
+    Verify Firebase/Google idToken via Firebase Identity Toolkit REST API.
+    Requires env FIREBASE_WEB_API_KEY.
+    """
+    api_key = os.environ.get("FIREBASE_WEB_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Google Login غير مهيأ: FIREBASE_WEB_API_KEY مفقود")
+
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:lookup?key={api_key}"
+    try:
+        r = requests.post(url, json={"idToken": id_token}, timeout=12)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"تعذر الاتصال بخدمة Google: {exc}")
+
+    if r.status_code != 200:
+        try:
+            err = r.json()
+        except Exception:
+            err = {"raw": r.text}
+        raise HTTPException(status_code=401, detail=f"فشل التحقق من Google: {err}")
+
+    data = r.json() or {}
+    users = data.get("users") or []
+    if not users:
+        raise HTTPException(status_code=401, detail="id_token غير صالح أو منتهي")
+
+    u = users[0]
+    return {
+        "email": u.get("email"),
+        "name": u.get("displayName") or "",
+        "picture": (u.get("photoUrl") or ""),
+        "uid": u.get("localId") or "",
+        "email_verified": bool(u.get("emailVerified")),
+    }
+
+
 @api_router.post("/auth/google", response_model=AuthOut)
 async def google_login(data: GoogleAuthIn):
-    if firebase_admin is None or firebase_auth is None:
-        raise HTTPException(
-            status_code=503,
-            detail="تسجيل الدخول بواسطة Google غير متاح حالياً",
-        )
+    """
+    Google/Firebase login.
 
-    try:
-        if not firebase_admin._apps:
-            service_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+    Uses firebase-admin when available.
+    If firebase-admin is not installed (e.g. Termux), uses the
+    Firebase REST accounts:lookup endpoint instead.
+    """
+    decoded = None
 
-            if service_json:
-                cred = credentials.Certificate(json.loads(service_json))
-                firebase_admin.initialize_app(cred)
-            else:
-                key_path = ROOT_DIR / "serviceAccountKey.json"
+    # ---------------------------------------------------------
+    # 1) Try Firebase Admin SDK if it is installed/configured
+    # ---------------------------------------------------------
+    if firebase_admin is not None and firebase_auth is not None:
+        try:
+            if not firebase_admin._apps:
+                service_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
 
-                if not key_path.exists():
-                    raise HTTPException(
-                        status_code=500,
-                        detail="serviceAccountKey.json not found",
-                    )
+                if service_json:
+                    cred = credentials.Certificate(json.loads(service_json))
+                    firebase_admin.initialize_app(cred)
+                else:
+                    key_path = ROOT_DIR / "serviceAccountKey.json"
+                    if key_path.exists():
+                        cred = credentials.Certificate(str(key_path))
+                        firebase_admin.initialize_app(cred)
 
-                cred = credentials.Certificate(str(key_path))
-                firebase_admin.initialize_app(cred)
+            if firebase_admin._apps:
+                decoded = firebase_auth.verify_id_token(
+                    data.id_token,
+                    check_revoked=False,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Firebase Admin verification unavailable, using REST fallback: %r",
+                exc,
+            )
+            decoded = None
 
-        decoded = firebase_auth.verify_id_token(
-            data.id_token,
-            check_revoked=False,
-        )
-    except Exception as exc:
-        import traceback
+    # ---------------------------------------------------------
+    # 2) REST fallback
+    # ---------------------------------------------------------
+    if decoded is None:
+        try:
+            decoded = _verify_google_id_token_via_firebase_rest(data.id_token)
+        except Exception as exc:
+            import traceback
 
-        logger.error(
-            "GOOGLE VERIFY ERROR: %r",
-            exc,
-        )
+            logger.error("GOOGLE REST VERIFY ERROR: %r", exc)
+            logger.error(traceback.format_exc())
 
-        logger.error(traceback.format_exc())
-
-        raise HTTPException(
-            status_code=401,
-            detail=str(exc),
-        )
+            raise HTTPException(
+                status_code=401,
+                detail="تعذر التحقق من حساب Google",
+            )
 
     email = str(decoded.get("email") or "").lower().strip()
     name = str(decoded.get("name") or "").strip()
     picture = str(decoded.get("picture") or "").strip()
-    firebase_uid = str(decoded.get("uid") or decoded.get("sub") or "").strip()
+    firebase_uid = str(
+        decoded.get("uid") or decoded.get("sub") or ""
+    ).strip()
     email_verified = bool(decoded.get("email_verified"))
 
     if not email or not firebase_uid:
@@ -1207,6 +1259,9 @@ async def google_login(data: GoogleAuthIn):
             detail="البريد الإلكتروني في حساب Google غير موثّق",
         )
 
+    # ---------------------------------------------------------
+    # 3) Find existing user by email
+    # ---------------------------------------------------------
     user = await db.users.find_one({"email": email})
 
     if user:
@@ -1218,6 +1273,9 @@ async def google_login(data: GoogleAuthIn):
         if picture and not user.get("avatar"):
             updates["avatar"] = picture
 
+        if name and not user.get("name"):
+            updates["name"] = name
+
         await db.users.update_one(
             {"id": user["id"]},
             {"$set": updates},
@@ -1228,6 +1286,9 @@ async def google_login(data: GoogleAuthIn):
             **updates,
         }
 
+    # ---------------------------------------------------------
+    # 4) Create new user
+    # ---------------------------------------------------------
     else:
         user_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -1246,6 +1307,9 @@ async def google_login(data: GoogleAuthIn):
 
         await db.users.insert_one(user)
 
+    # ---------------------------------------------------------
+    # 5) Issue normal King Predictions JWT
+    # ---------------------------------------------------------
     token = create_token(user["id"])
 
     return {
