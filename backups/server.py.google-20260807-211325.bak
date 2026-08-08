@@ -10,12 +10,6 @@ import os
 
 
 API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
-
-HIGHLIGHTLY_KEY = os.environ.get("HIGHLIGHTLY_KEY")
-HIGHLIGHTLY_BASE_URL = os.environ.get(
-    "HIGHLIGHTLY_BASE_URL",
-    "https://highlightly.net"
-)
 API_FOOTBALL_BASE_URL = os.environ.get(
     "API_FOOTBALL_BASE_URL",
     "https://v3.football.api-sports.io",
@@ -1190,18 +1184,9 @@ def _verify_google_id_token_via_firebase_rest(id_token: str) -> dict:
 
 @api_router.post("/auth/google", response_model=AuthOut)
 async def google_login(data: GoogleAuthIn):
-    """
-    Google/Firebase login.
-
-    Uses firebase-admin when available.
-    If firebase-admin is not installed (e.g. Termux), uses the
-    Firebase REST accounts:lookup endpoint instead.
-    """
+    # Prefer firebase-admin if available, otherwise REST fallback (works on Termux & Render).
     decoded = None
 
-    # ---------------------------------------------------------
-    # 1) Try Firebase Admin SDK if it is installed/configured
-    # ---------------------------------------------------------
     if firebase_admin is not None and firebase_auth is not None:
         try:
             if not firebase_admin._apps:
@@ -1217,40 +1202,55 @@ async def google_login(data: GoogleAuthIn):
                         firebase_admin.initialize_app(cred)
 
             if firebase_admin._apps:
-                decoded = firebase_auth.verify_id_token(
-                    data.id_token,
-                    check_revoked=False,
-                )
-        except Exception as exc:
-            logger.warning(
-                "Firebase Admin verification unavailable, using REST fallback: %r",
-                exc,
-            )
+                decoded = firebase_auth.verify_id_token(data.id_token, check_revoked=False)
+        except Exception:
             decoded = None
 
-    # ---------------------------------------------------------
-    # 2) REST fallback
-    # ---------------------------------------------------------
     if decoded is None:
-        try:
-            decoded = _verify_google_id_token_via_firebase_rest(data.id_token)
-        except Exception as exc:
-            import traceback
+        decoded = _verify_google_id_token_via_firebase_rest(data.id_token)
 
-            logger.error("GOOGLE REST VERIFY ERROR: %r", exc)
-            logger.error(traceback.format_exc())
+    try:
+        if not firebase_admin._apps:
+            service_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
 
-            raise HTTPException(
-                status_code=401,
-                detail="تعذر التحقق من حساب Google",
-            )
+            if service_json:
+                cred = credentials.Certificate(json.loads(service_json))
+                firebase_admin.initialize_app(cred)
+            else:
+                key_path = ROOT_DIR / "serviceAccountKey.json"
+
+                if not key_path.exists():
+                    raise HTTPException(
+                        status_code=500,
+                        detail="serviceAccountKey.json not found",
+                    )
+
+                cred = credentials.Certificate(str(key_path))
+                firebase_admin.initialize_app(cred)
+
+        decoded = firebase_auth.verify_id_token(
+            data.id_token,
+            check_revoked=False,
+        )
+    except Exception as exc:
+        import traceback
+
+        logger.error(
+            "GOOGLE VERIFY ERROR: %r",
+            exc,
+        )
+
+        logger.error(traceback.format_exc())
+
+        raise HTTPException(
+            status_code=401,
+            detail=str(exc),
+        )
 
     email = str(decoded.get("email") or "").lower().strip()
     name = str(decoded.get("name") or "").strip()
     picture = str(decoded.get("picture") or "").strip()
-    firebase_uid = str(
-        decoded.get("uid") or decoded.get("sub") or ""
-    ).strip()
+    firebase_uid = str(decoded.get("uid") or decoded.get("sub") or "").strip()
     email_verified = bool(decoded.get("email_verified"))
 
     if not email or not firebase_uid:
@@ -1265,9 +1265,6 @@ async def google_login(data: GoogleAuthIn):
             detail="البريد الإلكتروني في حساب Google غير موثّق",
         )
 
-    # ---------------------------------------------------------
-    # 3) Find existing user by email
-    # ---------------------------------------------------------
     user = await db.users.find_one({"email": email})
 
     if user:
@@ -1279,9 +1276,6 @@ async def google_login(data: GoogleAuthIn):
         if picture and not user.get("avatar"):
             updates["avatar"] = picture
 
-        if name and not user.get("name"):
-            updates["name"] = name
-
         await db.users.update_one(
             {"id": user["id"]},
             {"$set": updates},
@@ -1292,9 +1286,6 @@ async def google_login(data: GoogleAuthIn):
             **updates,
         }
 
-    # ---------------------------------------------------------
-    # 4) Create new user
-    # ---------------------------------------------------------
     else:
         user_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -1313,9 +1304,6 @@ async def google_login(data: GoogleAuthIn):
 
         await db.users.insert_one(user)
 
-    # ---------------------------------------------------------
-    # 5) Issue normal King Predictions JWT
-    # ---------------------------------------------------------
     token = create_token(user["id"])
 
     return {
@@ -5231,209 +5219,6 @@ async def enrich_matches_from_highlightly(matches: list):
     return matches
 
 
-
-async def fetch_highlightly_matches(league_id: int, season: int):
-    headers = {
-        "x-rapidapi-key": HIGHLIGHTLY_KEY
-    }
-
-    base_params = {
-        "leagueId": 262041 if int(league_id) == 307 else league_id,
-        "season": season,
-        "limit": 100,
-    }
-
-    def _kickoff_fields(date_value, timestamp):
-        kickoff_utc = None
-        match_date_mecca = None
-        kickoff_mecca = None
-        if date_value:
-            try:
-                dt = datetime.fromisoformat(
-                    str(date_value).replace("Z", "+00:00")
-                )
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                kickoff_utc = dt.isoformat().replace("+00:00", "Z")
-                local_dt = dt.astimezone(MECCA_TZ)
-                match_date_mecca = local_dt.date().isoformat()
-                kickoff_mecca = local_dt.isoformat()
-            except Exception:
-                pass
-        if kickoff_utc is None and timestamp is not None:
-            try:
-                dt = datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-                kickoff_utc = dt.isoformat().replace("+00:00", "Z")
-                local_dt = dt.astimezone(MECCA_TZ)
-                match_date_mecca = local_dt.date().isoformat()
-                kickoff_mecca = local_dt.isoformat()
-            except Exception:
-                pass
-        return kickoff_utc, match_date_mecca, kickoff_mecca
-
-    from datetime import timedelta as _td
-    _MECCA_TZ = timezone(_td(hours=3))
-    fixtures = []
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        offset = 0
-
-        while True:
-            params = {
-                **base_params,
-                "offset": offset,
-            }
-
-            response = await client.get(
-                f"{HIGHLIGHTLY_BASE_URL}/matches",
-                headers=headers,
-                params=params,
-            )
-
-            response.raise_for_status()
-
-            data = response.json()
-
-            rows = data.get("data") or data.get("response") or []
-
-            for item in rows:
-                home = (
-                    item.get("homeTeam")
-                    or item.get("home_team")
-                    or {}
-                )
-
-                away = (
-                    item.get("awayTeam")
-                    or item.get("away_team")
-                    or {}
-                )
-
-                state = item.get("state") or {}
-                score = state.get("score") or {}
-                current_score = score.get("current")
-
-                home_score = None
-                away_score = None
-
-                if isinstance(current_score, dict):
-                    home_score = current_score.get("home")
-                    away_score = current_score.get("away")
-                elif isinstance(current_score, (list, tuple)):
-                    if len(current_score) >= 2:
-                        home_score = current_score[0]
-                        away_score = current_score[1]
-
-                date_value = item.get("date")
-                timestamp = item.get("timestamp")
-
-                if timestamp is None and date_value:
-                    try:
-                        timestamp = datetime.fromisoformat(
-                            date_value.replace("Z", "+00:00")
-                        ).timestamp()
-                    except Exception:
-                        timestamp = None
-
-                league = item.get("league") or {}
-                country = item.get("country") or {}
-                round_name = item.get("round")
-
-                (
-                    kickoff_utc_value,
-                    match_date_mecca_value,
-                    kickoff_mecca_value,
-                ) = _kickoff_fields(date_value, timestamp)
-                fixtures.append({
-                    "id": item.get("id"),
-                    "fixture_id": item.get("id"),
-                    "timestamp": timestamp,
-                    "date": date_value,
-                    "kickoff_utc": kickoff_utc_value,
-                    "kickoff": kickoff_utc_value,
-                    "match_date": match_date_mecca_value,
-                    "kickoff_mecca": kickoff_mecca_value,
-
-                    "league": {
-                        "id": league.get("id") or 262041,
-                        "name": league.get("name") or "Pro League",
-                        "name_en": league.get("name") or "Pro League",
-                        "round": round_name,
-                        "round_en": round_name,
-                        "country": country.get("name") or "Saudi Arabia",
-                    },
-
-                    "teams": {
-                        "home": {
-                            "id": home.get("id"),
-                            "name": home.get("name"),
-                            "name_en": home.get("name"),
-                            "logo": home.get("logo"),
-                        },
-                        "away": {
-                            "id": away.get("id"),
-                            "name": away.get("name"),
-                            "name_en": away.get("name"),
-                            "logo": away.get("logo"),
-                        },
-                    },
-
-                    "goals": {
-                        "home": home_score,
-                        "away": away_score,
-                    },
-
-                    "status": state.get("description"),
-                    "status_short": state.get("description"),
-                    "clock": state.get("clock"),
-                })
-
-            pagination = data.get("pagination") or {}
-
-            total_count = pagination.get("totalCount")
-            current_offset = pagination.get("offset", offset)
-            current_limit = pagination.get("limit", len(rows))
-
-            if not rows:
-                break
-
-            next_offset = current_offset + current_limit
-
-            if (
-                total_count is not None
-                and next_offset >= total_count
-            ):
-                break
-
-            if len(rows) < current_limit:
-                break
-
-            offset = next_offset
-
-    fixtures.sort(
-        key=lambda x: x.get("timestamp") or 0
-    )
-
-    # منع التكرار (لأي سبب مستقبلي)
-    unique_fixtures = []
-    seen_ids = set()
-    for f in fixtures:
-        f_id = f.get("id") or f.get("fixture_id")
-        if f_id is None or f_id not in seen_ids:
-            seen_ids.add(f_id)
-            unique_fixtures.append(f)
-    fixtures = unique_fixtures
-
-    logger.info(
-        "HIGHLIGHTLY MATCHES: league=%s season=%s total=%s",
-        league_id,
-        season,
-        len(fixtures),
-    )
-
-    return fixtures
-
-
 async def fetch_football_data_matches(league_id: int, season: int):
     competition_code = FOOTBALL_DATA_COMPETITIONS.get(int(league_id))
 
@@ -5779,8 +5564,6 @@ async def get_competitions():
         # by its starting year: 2025.
         if int(row["id"]) == 2:
             effective_season = 2025
-        elif int(row["id"]) == 307:
-            effective_season = 2026
 
         row["api_current_season"] = row.get("current_season")
         row["current_season"] = effective_season
@@ -6076,20 +5859,6 @@ async def sync_competition_dataset(
             )
 
             match_source = "football_data"
-
-        elif league_id == 307:
-            logger.info(
-                "COMPETITION MATCHES REFRESH: Highlightly Saudi league=%s season=%s",
-                league_id,
-                season,
-            )
-
-            fixtures = await fetch_highlightly_matches(
-                league_id,
-                season
-            )
-
-            match_source = "highlightly"
 
         else:
             logger.info(

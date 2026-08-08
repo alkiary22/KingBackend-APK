@@ -5271,8 +5271,11 @@ async def fetch_highlightly_matches(league_id: int, season: int):
                 pass
         return kickoff_utc, match_date_mecca, kickoff_mecca
 
-    from datetime import timedelta as _td
-    _MECCA_TZ = timezone(_td(hours=3))
+    try:
+        from zoneinfo import ZoneInfo
+        _MECCA_TZ = ZoneInfo("Asia/Riyadh")
+    except Exception:
+        _MECCA_TZ = timezone(timedelta(hours=3))
     fixtures = []
 
     async with httpx.AsyncClient(timeout=30) as client:

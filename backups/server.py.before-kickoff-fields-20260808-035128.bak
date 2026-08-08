@@ -5243,36 +5243,6 @@ async def fetch_highlightly_matches(league_id: int, season: int):
         "limit": 100,
     }
 
-    def _kickoff_fields(date_value, timestamp):
-        kickoff_utc = None
-        match_date_mecca = None
-        kickoff_mecca = None
-        if date_value:
-            try:
-                dt = datetime.fromisoformat(
-                    str(date_value).replace("Z", "+00:00")
-                )
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                kickoff_utc = dt.isoformat().replace("+00:00", "Z")
-                local_dt = dt.astimezone(MECCA_TZ)
-                match_date_mecca = local_dt.date().isoformat()
-                kickoff_mecca = local_dt.isoformat()
-            except Exception:
-                pass
-        if kickoff_utc is None and timestamp is not None:
-            try:
-                dt = datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-                kickoff_utc = dt.isoformat().replace("+00:00", "Z")
-                local_dt = dt.astimezone(MECCA_TZ)
-                match_date_mecca = local_dt.date().isoformat()
-                kickoff_mecca = local_dt.isoformat()
-            except Exception:
-                pass
-        return kickoff_utc, match_date_mecca, kickoff_mecca
-
-    from datetime import timedelta as _td
-    _MECCA_TZ = timezone(_td(hours=3))
     fixtures = []
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -5339,20 +5309,10 @@ async def fetch_highlightly_matches(league_id: int, season: int):
                 country = item.get("country") or {}
                 round_name = item.get("round")
 
-                (
-                    kickoff_utc_value,
-                    match_date_mecca_value,
-                    kickoff_mecca_value,
-                ) = _kickoff_fields(date_value, timestamp)
                 fixtures.append({
                     "id": item.get("id"),
-                    "fixture_id": item.get("id"),
                     "timestamp": timestamp,
                     "date": date_value,
-                    "kickoff_utc": kickoff_utc_value,
-                    "kickoff": kickoff_utc_value,
-                    "match_date": match_date_mecca_value,
-                    "kickoff_mecca": kickoff_mecca_value,
 
                     "league": {
                         "id": league.get("id") or 262041,
