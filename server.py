@@ -5457,6 +5457,689 @@ async def get_challenge_status():
 # ===== End Challenge Lock API =====
 
 
+
+# ============================================================
+# AUTO SYNC RESULTS FROM FOOTBALL-DATA.ORG
+# ============================================================
+
+
+async def sync_results_from_highlightly_saudi():
+    """
+    Sync finished Saudi Pro League (league 307) results from Highlightly.
+
+    IMPORTANT:
+    - Reads results from Highlightly only.
+    - Updates existing db.matches only.
+    - Does NOT create/delete matches.
+    - Does NOT modify predictions directly.
+    - Uses apply_match_result() so the existing points system remains intact.
+    """
+
+    sync_start = datetime.now(timezone.utc).isoformat()
+    checked = 0
+    updated = 0
+    skipped = 0
+    errors = []
+
+    try:
+        fixtures = await fetch_highlightly_matches(307, 2026)
+    except Exception as e:
+        logger.warning(
+            "HIGHLIGHTLY SAUDI RESULTS FETCH FAILED: %s",
+            e,
+        )
+        await db.app_state.update_one(
+            {"key": "last_sync_highlightly_saudi"},
+            {
+                "$set": {
+                    "key": "last_sync_highlightly_saudi",
+                    "at": sync_start,
+                    "ok": False,
+                    "checked": 0,
+                    "updated": 0,
+                    "skipped": 0,
+                    "errors": [str(e)],
+                }
+            },
+            upsert=True,
+        )
+        return {
+            "ok": False,
+            "checked": 0,
+            "updated": 0,
+            "skipped": 0,
+            "errors": [str(e)],
+            "synced_at": sync_start,
+        }
+
+    # Existing Saudi matches only.
+    matches = await db.matches.find(
+        {
+            "league_id": 307,
+        },
+        {
+            "_id": 0,
+            "id": 1,
+            "home_team": 1,
+            "away_team": 1,
+            "kickoff": 1,
+            "kickoff_utc": 1,
+            "status": 1,
+        },
+    ).to_list(1000)
+
+    # Resolve stored team codes such as fd:2501873 to their real team names.
+    # This is needed because Highlightly returns team names.
+    football_teams = await db.football_teams.find(
+        {},
+        {
+            "_id": 0,
+            "code": 1,
+            "name": 1,
+            "name_en": 1,
+            "name_ar": 1,
+        },
+    ).to_list(50000)
+
+    team_code_names = {}
+
+    for team in football_teams:
+        code = str(team.get("code") or "").strip()
+        if not code:
+            continue
+
+        names = [
+            team.get("name_en"),
+            team.get("name"),
+            team.get("name_ar"),
+        ]
+
+        names = [
+            str(name).strip()
+            for name in names
+            if name and str(name).strip()
+        ]
+
+        if names:
+            team_code_names[code] = names
+
+    logger.info(
+        "HIGHLIGHTLY SAUDI TEAM MAP: %s teams loaded",
+        len(team_code_names),
+    )
+
+    def normalize_team_name(value):
+        if value is None:
+            return ""
+        value = str(value).strip().casefold()
+        for ch in ".-_":
+            value = value.replace(ch, " ")
+        return " ".join(value.split())
+
+    def get_match_team_name(match, side):
+        value = match.get(f"{side}_team")
+
+        # Stored matches may use provider codes such as fd:2501873.
+        # Resolve those codes through football_teams before comparing
+        # with Highlightly team names.
+        raw_value = str(value or "").strip()
+
+        if raw_value in team_code_names:
+            names = team_code_names[raw_value]
+            if names:
+                return normalize_team_name(names[0])
+
+        return normalize_team_name(value)
+
+    def get_fixture_team_name(fixture, side):
+        team = (fixture.get("teams") or {}).get(side) or {}
+        return normalize_team_name(
+            team.get("name_en")
+            or team.get("name")
+        )
+
+    def parse_kickoff(value):
+        return _parse_dt(value)
+
+    def is_finished(fixture):
+        status = str(
+            fixture.get("status_short")
+            or fixture.get("status")
+            or ""
+        ).strip().casefold()
+
+        finished_values = {
+            "finished",
+            "ft",
+            "full time",
+            "full-time",
+            "ended",
+            "completed",
+            "complete",
+            "final",
+        }
+
+        return status in finished_values
+
+    for fixture in fixtures:
+        try:
+            if not is_finished(fixture):
+                skipped += 1
+                continue
+
+            goals = fixture.get("goals") or {}
+            home_score = goals.get("home")
+            away_score = goals.get("away")
+
+            if not isinstance(home_score, int) or not isinstance(away_score, int):
+                skipped += 1
+                continue
+
+            f_home = get_fixture_team_name(fixture, "home")
+            f_away = get_fixture_team_name(fixture, "away")
+
+            if not f_home or not f_away:
+                skipped += 1
+                continue
+
+            fixture_kickoff = parse_kickoff(
+                fixture.get("kickoff_utc")
+                or fixture.get("kickoff")
+                or fixture.get("date")
+            )
+
+            # Find the exact existing Saudi match.
+            candidates = []
+
+            for m in matches:
+                m_home = get_match_team_name(m, "home")
+                m_away = get_match_team_name(m, "away")
+
+                if not m_home or not m_away:
+                    continue
+
+                # Normal home/away match
+                exact_order = (
+                    m_home == f_home and
+                    m_away == f_away
+                )
+
+                if not exact_order:
+                    continue
+
+                score = 0
+
+                # Strongest match: same kickoff within 24 hours.
+                m_kickoff = parse_kickoff(
+                    m.get("kickoff_utc")
+                    or m.get("kickoff")
+                )
+
+                if fixture_kickoff and m_kickoff:
+                    diff = abs(
+                        (fixture_kickoff - m_kickoff).total_seconds()
+                    )
+
+                    if diff <= 86400:
+                        score += 100
+                    elif diff <= 172800:
+                        score += 50
+                    else:
+                        continue
+
+                candidates.append((score, m))
+
+            if not candidates:
+                skipped += 1
+                continue
+
+            candidates.sort(
+                key=lambda x: x[0],
+                reverse=True,
+            )
+
+            match = candidates[0][1]
+            checked += 1
+
+            await apply_match_result(
+                match["id"],
+                int(home_score),
+                int(away_score),
+                source="highlightly_saudi",
+            )
+
+            await db.matches.update_one(
+                {"id": match["id"]},
+                {
+                    "$set": {
+                        "result_provider": "highlightly",
+                        "result_source": "highlightly_saudi",
+                        "highlightly_fixture_id": fixture.get("id"),
+                    }
+                },
+            )
+
+            updated += 1
+
+            logger.info(
+                "HIGHLIGHTLY SAUDI RESULT APPLIED: %s vs %s %s-%s match=%s",
+                f_home,
+                f_away,
+                home_score,
+                away_score,
+                match["id"],
+            )
+
+        except Exception as e:
+            errors.append(str(e))
+            logger.warning(
+                "HIGHLIGHTLY SAUDI FIXTURE SYNC FAILED: %s",
+                e,
+            )
+
+    await db.app_state.update_one(
+        {"key": "last_sync_highlightly_saudi"},
+        {
+            "$set": {
+                "key": "last_sync_highlightly_saudi",
+                "at": sync_start,
+                "ok": True,
+                "checked": checked,
+                "updated": updated,
+                "skipped": skipped,
+                "errors": errors[:20],
+            }
+        },
+        upsert=True,
+    )
+
+    logger.info(
+        "HIGHLIGHTLY SAUDI RESULTS FINISHED updated=%s checked=%s skipped=%s errors=%s",
+        updated,
+        checked,
+        skipped,
+        len(errors),
+    )
+
+    return {
+        "ok": True,
+        "checked": checked,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "synced_at": sync_start,
+    }
+
+
+async def auto_sync_highlightly_saudi_results_loop():
+    """
+    Background Saudi Pro League result sync.
+    Runs every 5 minutes.
+    """
+
+    await asyncio.sleep(60)
+
+    while True:
+        try:
+            await sync_results_from_highlightly_saudi()
+        except Exception as e:
+            logger.warning(
+                "AUTO HIGHLIGHTLY SAUDI RESULTS LOOP FAILED: %s",
+                e,
+            )
+
+        await asyncio.sleep(300)
+
+
+@api_router.post("/admin/highlightly/saudi/sync-results")
+async def admin_highlightly_saudi_sync_results(
+    _staff=Depends(require_staff),
+):
+    return await sync_results_from_highlightly_saudi()
+
+
+@api_router.get("/admin/highlightly/saudi/last-sync")
+async def admin_highlightly_saudi_last_sync(
+    _staff=Depends(require_staff),
+):
+    doc = await db.app_state.find_one(
+        {"key": "last_sync_highlightly_saudi"},
+        {"_id": 0},
+    )
+
+    return doc or {
+        "key": "last_sync_highlightly_saudi",
+        "at": None,
+        "ok": None,
+        "checked": 0,
+        "updated": 0,
+        "skipped": 0,
+        "errors": [],
+    }
+
+
+async def sync_results_from_football_data():
+    """
+    Sync finished results for existing db.matches records whose
+    external_provider is fd / football_data.
+
+    IMPORTANT:
+    - Does NOT create new matches.
+    - Does NOT delete matches.
+    - Does NOT modify predictions directly.
+    - Uses apply_match_result() so prediction points and user totals
+      remain protected by the existing scoring logic.
+    """
+
+    sync_start = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+
+    updated = 0
+    checked = 0
+    skipped = 0
+    errors = []
+
+    # Only existing Football-Data.org matches.
+    matches = await db.matches.find(
+        {
+            "$or": [
+                {"external_provider": "fd"},
+                {"external_provider": "football_data"},
+            ],
+            "external_fixture_id": {"$exists": True},
+            "status": {"$ne": "finished"},
+        },
+        {
+            "_id": 0,
+            "id": 1,
+            "external_fixture_id": 1,
+            "league_id": 1,
+            "season": 1,
+            "kickoff": 1,
+            "kickoff_utc": 1,
+            "status": 1,
+        },
+    ).to_list(1000)
+
+    # Group matches by league so we make one Football-Data request
+    # per competition instead of one request per match.
+    league_matches = {}
+
+    for m in matches:
+        kickoff_value = m.get("kickoff") or m.get("kickoff_utc")
+        kickoff_dt = _parse_dt(kickoff_value)
+
+        # Do not query matches that have not started yet.
+        if kickoff_dt and kickoff_dt > now + timedelta(minutes=1):
+            skipped += 1
+            continue
+
+        league_id = m.get("league_id")
+
+        try:
+            league_id = int(league_id)
+        except Exception:
+            skipped += 1
+            continue
+
+        if league_id not in FOOTBALL_DATA_COMPETITIONS:
+            skipped += 1
+            continue
+
+        league_matches.setdefault(league_id, []).append(m)
+
+    for league_id, db_matches in league_matches.items():
+
+        # Existing Football-Data matches currently use the 2026 season.
+        # If a match explicitly has a season, use it; otherwise 2026.
+        seasons = set()
+
+        for m in db_matches:
+            try:
+                season = int(m.get("season") or 2026)
+            except Exception:
+                season = 2026
+            seasons.add(season)
+
+        for season in seasons:
+
+            try:
+                logger.info(
+                    "FD RESULTS SYNC: league=%s season=%s checking=%s",
+                    league_id,
+                    season,
+                    len(db_matches),
+                )
+
+                fresh_matches = await fetch_football_data_matches(
+                    league_id,
+                    season,
+                )
+
+                # Index Football-Data fixtures by their numeric ID.
+                by_fixture_id = {}
+
+                for fixture in fresh_matches:
+                    raw_id = (
+                        fixture.get("external_fixture_id")
+                        or fixture.get("fixture_id")
+                    )
+
+                    if raw_id is None:
+                        continue
+
+                    try:
+                        fixture_id = int(
+                            str(raw_id).replace("fd:", "")
+                        )
+                    except Exception:
+                        continue
+
+                    by_fixture_id[fixture_id] = fixture
+
+                for m in db_matches:
+
+                    raw_fid = m.get("external_fixture_id")
+
+                    try:
+                        fid = int(
+                            str(raw_fid).replace("fd:", "")
+                        )
+                    except Exception:
+                        continue
+
+                    item = by_fixture_id.get(fid)
+
+                    if not item:
+                        logger.info(
+                            "FD RESULT NOT FOUND fixture=%s league=%s",
+                            fid,
+                            league_id,
+                        )
+                        continue
+
+                    checked += 1
+
+                    status = (
+                        item.get("status") or {}
+                    )
+
+                    status_short = str(
+                        status.get("short") or ""
+                    ).upper()
+
+                    status_long = str(
+                        status.get("long") or ""
+                    ).upper()
+
+                    # Football-Data.org finished statuses.
+                    is_finished = (
+                        status_short == "FT"
+                        or status_long in {
+                            "FINISHED",
+                            "AWARDED",
+                        }
+                    )
+
+                    if not is_finished:
+                        continue
+
+                    goals = item.get("goals") or {}
+
+                    home_score = goals.get("home")
+                    away_score = goals.get("away")
+
+                    if not isinstance(home_score, int):
+                        continue
+
+                    if not isinstance(away_score, int):
+                        continue
+
+                    # Re-check DB before applying the result.
+                    # Prevent duplicate scoring/notifications.
+                    current = await db.matches.find_one(
+                        {"id": m["id"]},
+                        {
+                            "_id": 0,
+                            "status": 1,
+                        },
+                    )
+
+                    if not current:
+                        continue
+
+                    if current.get("status") == "finished":
+                        continue
+
+                    logger.info(
+                        "FD RESULT APPLY: fixture=%s score=%s-%s",
+                        fid,
+                        home_score,
+                        away_score,
+                    )
+
+                    await apply_match_result(
+                        m["id"],
+                        int(home_score),
+                        int(away_score),
+                        source="football_data",
+                    )
+
+                    await db.matches.update_one(
+                        {"id": m["id"]},
+                        {
+                            "$set": {
+                                "result_provider": "football_data",
+                                "external_provider": "fd",
+                                "external_fixture_id": fid,
+                                "result_updated_at": datetime.now(
+                                    timezone.utc
+                                ).isoformat(),
+                            }
+                        },
+                    )
+
+                    updated += 1
+
+            except Exception as e:
+                logger.exception(
+                    "FD RESULTS SYNC FAILED league=%s season=%s",
+                    league_id,
+                    season,
+                )
+                errors.append({
+                    "league_id": league_id,
+                    "season": season,
+                    "error": str(e),
+                })
+
+    await db.app_state.update_one(
+        {"key": "last_sync_football_data_results"},
+        {
+            "$set": {
+                "key": "last_sync_football_data_results",
+                "at": sync_start,
+                "ok": len(errors) == 0,
+                "updated": updated,
+                "checked": checked,
+                "skipped": skipped,
+                "errors": errors,
+            }
+        },
+        upsert=True,
+    )
+
+    logger.info(
+        "FD RESULTS SYNC FINISHED updated=%s checked=%s skipped=%s errors=%s",
+        updated,
+        checked,
+        skipped,
+        len(errors),
+    )
+
+    return {
+        "ok": len(errors) == 0,
+        "updated": updated,
+        "checked": checked,
+        "skipped": skipped,
+        "errors": errors,
+        "synced_at": sync_start,
+    }
+
+
+async def auto_sync_football_data_results_loop():
+    """
+    Automatically check Football-Data.org for finished results.
+
+    Runs every 5 minutes.
+    """
+
+    # Give the application time to finish startup.
+    await asyncio.sleep(60)
+
+    while True:
+        try:
+            await sync_results_from_football_data()
+        except Exception as e:
+            logger.exception(
+                "AUTO FOOTBALL-DATA RESULTS LOOP FAILED: %s",
+                e,
+            )
+
+        await asyncio.sleep(300)
+
+
+@api_router.post("/admin/football-data/sync-results")
+async def admin_football_data_sync_results(
+    _staff=Depends(require_staff),
+):
+    """
+    Manually trigger Football-Data.org result synchronization.
+    """
+    return await sync_results_from_football_data()
+
+
+@api_router.get("/admin/football-data/last-sync")
+async def admin_football_data_last_sync(
+    _staff=Depends(require_staff),
+):
+    doc = await db.app_state.find_one(
+        {"key": "last_sync_football_data_results"},
+        {"_id": 0},
+    )
+
+    return doc or {
+        "key": "last_sync_football_data_results",
+        "at": None,
+        "ok": None,
+        "updated": 0,
+        "checked": 0,
+        "skipped": 0,
+        "errors": [],
+    }
+
+
+
 @app.on_event("startup")
 async def on_startup():
     # Indexes for faster login, matches, predictions, leaderboard, notifications and chat
@@ -6108,7 +6791,9 @@ async def start_auto_sync_results():
     asyncio.create_task(auto_sync_results_loop())
     asyncio.create_task(auto_match_reminders_loop())
     asyncio.create_task(auto_sync_api_football_results_loop())
+    asyncio.create_task(auto_sync_highlightly_saudi_results_loop())
     asyncio.create_task(auto_sync_competition_data_loop())
+    asyncio.create_task(auto_sync_football_data_results_loop())
 
 
 
@@ -6518,6 +7203,17 @@ async def fetch_highlightly_matches(league_id: int, season: int):
                     if len(current_score) >= 2:
                         home_score = current_score[0]
                         away_score = current_score[1]
+                elif isinstance(current_score, str):
+                    # Highlightly returns finished scores like "3 - 0"
+                    score_text = current_score.strip()
+                    try:
+                        parts = score_text.split("-")
+                        if len(parts) == 2:
+                            home_score = int(parts[0].strip())
+                            away_score = int(parts[1].strip())
+                    except (ValueError, TypeError):
+                        home_score = None
+                        away_score = None
 
                 date_value = item.get("date")
                 timestamp = item.get("timestamp")
