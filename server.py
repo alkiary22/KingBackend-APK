@@ -7193,16 +7193,52 @@ async def fetch_highlightly_matches(league_id: int, season: int):
                 score = state.get("score") or {}
                 current_score = score.get("current")
 
+                # Normalize Highlightly status to the format used by the app.
+                raw_status = str(
+                    state.get("description") or ""
+                ).strip()
+
+                HIGHLIGHTLY_STATUS_MAP = {
+                    "Not started": "NS",
+                    "Scheduled": "NS",
+                    "Finished": "FT",
+                    "Full Time": "FT",
+                    "Full-time": "FT",
+                    "In Play": "LIVE",
+                    "Live": "LIVE",
+                    "Paused": "HT",
+                    "Postponed": "PST",
+                    "Cancelled": "CANC",
+                }
+
+                status_short = HIGHLIGHTLY_STATUS_MAP.get(
+                    raw_status,
+                    raw_status.upper().replace(" ", "_")
+                    if raw_status
+                    else "NS"
+                )
+
                 home_score = None
                 away_score = None
 
                 if isinstance(current_score, dict):
                     home_score = current_score.get("home")
                     away_score = current_score.get("away")
+
                 elif isinstance(current_score, (list, tuple)):
                     if len(current_score) >= 2:
                         home_score = current_score[0]
                         away_score = current_score[1]
+
+                elif isinstance(current_score, str):
+                    try:
+                        parts = current_score.split("-")
+                        if len(parts) == 2:
+                            home_score = int(parts[0].strip())
+                            away_score = int(parts[1].strip())
+                    except (ValueError, TypeError):
+                        home_score = None
+                        away_score = None
                 elif isinstance(current_score, str):
                     # Highlightly returns finished scores like "3 - 0"
                     score_text = current_score.strip()
@@ -7274,8 +7310,11 @@ async def fetch_highlightly_matches(league_id: int, season: int):
                         "away": away_score,
                     },
 
-                    "status": state.get("description"),
-                    "status_short": state.get("description"),
+                    "status": {
+                        "short": status_short,
+                        "long": raw_status,
+                    },
+                    "status_short": status_short,
                     "clock": state.get("clock"),
                 })
 
