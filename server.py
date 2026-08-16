@@ -6285,69 +6285,143 @@ async def seed_test_live(current_user=Depends(require_admin)):
 
 @api_router.get("/external/live-matches")
 async def external_live_matches(all: bool = False):
-    api_key = os.environ.get("API_FOOTBALL_KEY")
+    """
+    Live football matches from SportsAPI Pro.
+
+    This endpoint is intentionally isolated from the internal matches,
+    predictions, points, users, Firebase and results systems.
+    """
+
+    api_key = os.environ.get("API_FOOTBALL_LIVE_KEY")
+
     if not api_key:
-        raise HTTPException(status_code=500, detail="API_FOOTBALL_KEY غير موجود")
+        raise HTTPException(
+            status_code=500,
+            detail="API_FOOTBALL_LIVE_KEY غير موجود"
+        )
 
-    url = "https://v3.football.api-sports.io/fixtures"
-    headers = {"x-apisports-key": api_key}
+    url = "https://v2.football.sportsapipro.com/api/live"
+    headers = {
+        "x-api-key": api_key,
+        "Accept": "application/json",
+    }
 
-    async with httpx.AsyncClient(timeout=20) as client_http:
-        r = await client_http.get(url, headers=headers, params={"live": "all"})
+    try:
+        async with httpx.AsyncClient(timeout=20) as client_http:
+            r = await client_http.get(url, headers=headers)
+
         if r.status_code != 200:
-            raise HTTPException(status_code=r.status_code, detail=r.text)
+            raise HTTPException(
+                status_code=r.status_code,
+                detail=r.text
+            )
 
         payload = r.json()
 
-    ALLOWED_LIVE_LEAGUES = {
-        "UEFA Champions League",
-        "Premier League",
-        "La Liga",
-        "Bundesliga",
-        "Ligue 1",
-        "Saudi Pro League",
-        "FIFA World Cup",
-        "World Cup",
-        "UEFA Europa League",
-        "UEFA Europa Conference League",
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"SportsAPI Pro live error: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"فشل الاتصال بمصدر المباريات المباشرة: {e}"
+        )
 
     items = []
-    for item in payload.get("response", []):
-        fixture = item.get("fixture", {})
-        league = item.get("league", {})
 
-        if not all and league.get("name") not in ALLOWED_LIVE_LEAGUES:
-            continue
-        teams = item.get("teams", {})
-        goals = item.get("goals", {})
-        status = fixture.get("status", {})
+    for event in payload.get("events", []):
+        tournament = event.get("tournament") or ""
 
-        home = teams.get("home", {}) or {}
-        away = teams.get("away", {}) or {}
+        home_team = event.get("homeTeam") or ""
+        away_team = event.get("awayTeam") or ""
+
+        home_score = event.get("homeScore")
+        away_score = event.get("awayScore")
+
+        status_value = event.get("status") or "live"
+
+        start_timestamp = event.get("startTimestamp")
+
+        date_value = None
+        if start_timestamp:
+            try:
+                date_value = datetime.fromtimestamp(
+                    int(start_timestamp),
+                    tz=timezone.utc
+                ).isoformat()
+            except Exception:
+                date_value = None
+
+        # حساب دقيقة المباراة من startTimestamp
+        elapsed_value = None
+        if start_timestamp:
+            try:
+                now_utc = datetime.now(timezone.utc)
+                kickoff = datetime.fromtimestamp(
+                    int(start_timestamp),
+                    tz=timezone.utc
+                )
+                minutes_since_kickoff = max(
+                    0,
+                    int((now_utc - kickoff).total_seconds() // 60)
+                )
+
+                status_lower = str(status_value).strip().lower()
+
+                if "1st half" in status_lower:
+                    elapsed_value = min(minutes_since_kickoff + 1, 45)
+
+                elif "halftime" in status_lower or "half time" in status_lower:
+                    elapsed_value = 45
+
+                elif "2nd half" in status_lower:
+                    elapsed_value = min(
+                        max(minutes_since_kickoff - 15, 45) + 1,
+                        90
+                    )
+
+                elif "extra" in status_lower:
+                    elapsed_value = min(
+                        max(minutes_since_kickoff - 30, 90) + 1,
+                        120
+                    )
+
+            except Exception as e:
+                print(f"Live elapsed calculation failed: {e}")
 
         items.append({
-            "id": fixture.get("id"),
-            "league": league_ar_name(league.get("name")),
-            "league_en": league.get("name"),
-            "league_id": league.get("id"),
-            "country": league.get("country"),
-            "league_logo": league.get("logo"),
-            "home_team": team_ar_name(home.get("name")),
-            "away_team": team_ar_name(away.get("name")),
-            "home_logo": home.get("logo"),
-            "away_logo": away.get("logo"),
-            "home_score": goals.get("home"),
-            "away_score": goals.get("away"),
-            "elapsed": status.get("elapsed"),
-            "status": status.get("short"),
-            "status_long": status.get("long"),
-            "date": fixture.get("date"),
+            "id": event.get("id"),
+
+            "league": league_ar_name(tournament),
+            "league_en": tournament,
+            "league_id": event.get("tournamentId"),
+
+            "country": None,
+            "league_logo": None,
+
+            "home_team": team_ar_name(home_team),
+            "away_team": team_ar_name(away_team),
+
+            "home_team_en": home_team,
+            "away_team_en": away_team,
+
+            "home_logo": None,
+            "away_logo": None,
+
+            "home_score": home_score,
+            "away_score": away_score,
+
+            "elapsed": elapsed_value,
+            "status": status_value,
+            "status_long": status_value,
+
+            "date": date_value,
+            "startTimestamp": start_timestamp,
+
+            "slug": event.get("slug"),
         })
 
     return items
-
-
 
 @api_router.post("/admin/import-new-fixtures")
 async def import_new_fixtures(_admin=Depends(require_admin)):
