@@ -3802,13 +3802,31 @@ async def sync_results_from_thesportsdb():
     try:
         events = await fetch_world_cup_events()
     except Exception as e:
-        logger.warning(f"TheSportsDB fetch failed: {e}")
+        # TheSportsDB may temporarily return 503.
+        # This must NOT be treated as an application failure and must
+        # NOT expose the provider error in the Admin dashboard.
+        logger.warning(f"TheSportsDB temporarily unavailable: {e}")
+
         await db.app_state.update_one(
             {"key": "last_sync"},
-            {"$set": {"key": "last_sync", "at": sync_start, "ok": False, "error": str(e), "updated": 0}},
+            {"$set": {
+                "key": "last_sync",
+                "at": sync_start,
+                "ok": True,
+                "updated": 0,
+                "checked": 0,
+                "source_unavailable": True,
+                "error": None,
+            }},
             upsert=True,
         )
-        return {"updated": 0, "checked": 0, "error": str(e), "synced_at": sync_start}
+
+        return {
+            "updated": 0,
+            "checked": 0,
+            "synced_at": sync_start,
+            "source_unavailable": True,
+        }
 
     updated = 0
     checked = 0
