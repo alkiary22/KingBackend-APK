@@ -6399,7 +6399,7 @@ _SPORTSCORE_LIVE_CACHE = {
     "data": None,
 }
 
-_SPORTSCORE_LIVE_CACHE_SECONDS = 45
+_SPORTSCORE_LIVE_CACHE_SECONDS = 2
 
 async def _fetch_sportscore_live():
     import re
@@ -6708,7 +6708,7 @@ async def external_live_matches(all: bool = False):
 # ==========================================================
 
 _SPORTSCORE_MATCH_DETAILS_CACHE = {}
-_SPORTSCORE_MATCH_DETAILS_CACHE_SECONDS = 10
+_SPORTSCORE_MATCH_DETAILS_CACHE_SECONDS = 1
 
 
 async def _fetch_sportscore_live_detail(slug: str):
