@@ -9396,6 +9396,227 @@ async def get_final_challenge_results(
 
 # ===== End Final World Cup Challenge API =====
 
+
+
+# ============================================================
+# 🧠 AI MATCH ANALYZER - Gemini
+# ============================================================
+@api_router.post("/ai/match-analysis")
+async def ai_match_analysis(request: Request):
+    """
+    تحليل المباراة بالذكاء الاصطناعي.
+    لا يغيّر النقاط أو التوقعات أو بيانات المباراة.
+    """
+
+    import os
+
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="مفتاح Gemini غير مهيأ في الباكيند"
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="بيانات المباراة غير صالحة"
+        )
+
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="بيانات المباراة غير صالحة"
+        )
+
+    # نأخذ فقط البيانات المطلوبة للتحليل
+    home_team = body.get("home_team") or body.get("home_team_name_ar") or "الفريق الأول"
+    away_team = body.get("away_team") or body.get("away_team_name_ar") or "الفريق الثاني"
+
+    data = {
+        "home_team": home_team,
+        "away_team": away_team,
+        "league": body.get("league_name_ar") or body.get("league") or "غير معروف",
+        "home_score": body.get("home_score", 0),
+        "away_score": body.get("away_score", 0),
+        "status": body.get("status", "مباشر"),
+        "elapsed": body.get("elapsed"),
+        "stats": body.get("stats") or {},
+        "latest_events": body.get("latest_events") or [],
+    }
+
+    prompt = f"""
+أنت محلل كرة قدم محترف داخل تطبيق "ملك التوقعات".
+
+مهمتك تقديم تحليل مباشر واحترافي للمباراة اعتمادًا حصريًا على البيانات الموجودة في الطلب.
+
+قواعد صارمة:
+- اكتب باللغة العربية فقط.
+- لا تستخدم أي كلمات أو جمل باللغة الإنجليزية.
+- لا تستخدم Markdown مثل النجوم أو علامات # أو الجداول.
+- استخدم العناوين التالية حرفيًا مع الرموز التعبيرية.
+- لا تخترع أي إحصائية أو هدف أو بطاقة أو حدث أو معلومة غير موجودة في البيانات.
+- إذا كانت معلومة غير متوفرة، اذكر بوضوح: "البيانات غير متوفرة".
+- لا تعتبر الفريق المتقدم بالضرورة هو الفريق الأخطر؛ قيّم ذلك من الإحصائيات والأحداث المتوفرة.
+- إذا لم توجد إحصائيات أو أحداث كافية، لا تدّعِ معرفة الفريق الأفضل فنيًا.
+- يمكنك استنتاج الحالة العامة من النتيجة والدقيقة، لكن وضّح أنها قراءة للمباراة وليست معلومة مؤكدة.
+- لا تقدم ضمانًا للفوز أو تسجيل هدف.
+- لا تقل إنك شاهدت المباراة أو تملك معلومات غير موجودة في البيانات.
+- لا تكرر نفس المعلومة في أكثر من قسم.
+- اجعل التحليل واضحًا ومفيدًا للمستخدم وسهل القراءة على الهاتف.
+
+بيانات المباراة:
+
+الفريق الأول:
+{data["home_team"]}
+
+الفريق الثاني:
+{data["away_team"]}
+
+البطولة:
+{data["league"]}
+
+النتيجة الحالية:
+{data["home_score"]} - {data["away_score"]}
+
+حالة المباراة:
+{data["status"]}
+
+الدقيقة:
+{data["elapsed"]}
+
+الإحصائيات المتوفرة:
+{data["stats"]}
+
+آخر الأحداث:
+{data["latest_events"]}
+
+اكتب النتيجة بهذا الشكل بالضبط:
+
+🔥 قراءة المباراة
+اذكر وضع المباراة الحالي، النتيجة، الدقيقة، ومن يملك الأفضلية إن كانت البيانات تسمح بذلك.
+
+⚽ الفريق الأخطر حاليًا
+حدد الفريق الأخطر فقط إذا كانت الإحصائيات أو الأحداث تدعم ذلك.
+اذكر السبب باختصار.
+
+📊 تحليل الإحصائيات
+حلل فقط الإحصائيات الموجودة فعليًا.
+ركز على الاستحواذ، التسديدات، التسديدات على المرمى، الركنيات، البطاقات وأي إحصائيات أخرى متوفرة.
+
+🎯 السيناريو الأقرب
+حلل ما يمكن أن يحدث في الدقائق المتبقية بناءً على البيانات الحالية.
+استخدم عبارات مثل "قد" و"من المرجح" و"السيناريو الأقرب" بدل الجزم.
+
+⚠️ نقطة يجب الانتباه لها
+اذكر أهم عامل قد يؤثر على سير المباراة بناءً على البيانات المتوفرة.
+
+🧠 الخلاصة
+قدم خلاصة قصيرة من سطرين أو ثلاثة توضح الصورة الحالية للمباراة.
+
+مهم جدًا:
+هذا تحليل رياضي مبني على البيانات المتاحة فقط، وليس ضمانًا لنتيجة المباراة.
+"""
+
+
+
+    try:
+        import httpx
+
+        url = (
+            "https://generativelanguage.googleapis.com/"
+            "v1beta/models/gemini-3.6-flash:generateContent"
+        )
+
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.25,
+                "maxOutputTokens": 1800,
+                "thinkingConfig": {
+                    "thinkingLevel": "minimal"
+                }
+            }
+        }
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                url,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": api_key,
+                },
+                json=payload,
+            )
+
+        if response.status_code != 200:
+            try:
+                error_data = response.json()
+            except Exception:
+                error_data = response.text[:500]
+
+            print("Gemini API error:", response.status_code, error_data)
+
+            raise HTTPException(
+                status_code=502,
+                detail="تعذر الحصول على تحليل الذكاء الاصطناعي"
+            )
+
+        result = response.json()
+
+        candidates = result.get("candidates") or []
+
+        if not candidates:
+            raise HTTPException(
+                status_code=502,
+                detail="لم يرجع الذكاء الاصطناعي تحليلًا"
+            )
+
+        parts = (
+            candidates[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+
+        text = "\n".join(
+            str(part.get("text", "")).strip()
+            for part in parts
+            if part.get("text")
+        ).strip()
+
+        if not text:
+            raise HTTPException(
+                status_code=502,
+                detail="التحليل فارغ"
+            )
+
+        return {
+            "success": True,
+            "analysis": text,
+            "model": "gemini-3.6-flash",
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        print("AI match analysis error:", repr(exc))
+
+        raise HTTPException(
+            status_code=502,
+            detail="حدث خطأ أثناء تحليل المباراة"
+        )
+
 app.include_router(api_router)
 
 
