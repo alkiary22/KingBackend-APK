@@ -6392,13 +6392,15 @@ async def seed_test_live(current_user=Depends(require_admin)):
 @api_router.get("/external/live-matches")
 async def external_live_matches(all: bool = False):
     """
-    Live football matches from SportsAPI Pro.
+    Live Center
 
-    This endpoint is intentionally isolated from the internal matches,
-    predictions, points, users, Firebase and results systems.
+    - SportsAPI /live يتم استدعاؤه بشكل محدود جدًا.
+    - بيانات الـLive يتم تخزينها مؤقتًا على مستوى السيرفر.
+    - تفاصيل المباريات والشعارات والأسماء العربية تحفظ في MongoDB.
+    - لا يتم طلب /api/match/{id} في كل تحديث.
     """
 
-    api_key = os.environ.get("API_FOOTBALL_LIVE_KEY")
+    api_key = os.environ.get("API_FOOTBALL_LIVE_KEY", "").strip()
 
     if not api_key:
         raise HTTPException(
@@ -6406,128 +6408,480 @@ async def external_live_matches(all: bool = False):
             detail="API_FOOTBALL_LIVE_KEY غير موجود"
         )
 
-    url = "https://v2.football.sportsapipro.com/api/live"
+    base_url = "https://v2.football.sportsapipro.com"
+
     headers = {
         "x-api-key": api_key,
         "Accept": "application/json",
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=20) as client_http:
-            r = await client_http.get(url, headers=headers)
+    import time
 
-        if r.status_code != 200:
-            raise HTTPException(
-                status_code=r.status_code,
-                detail=r.text
+    # ==========================================================
+    # SERVER LIVE CACHE
+    # يمنع كل مستخدم من استهلاك طلب جديد من SportsAPI
+    # 15 دقيقة = بحد أقصى 96 طلب Live في 24 ساعة
+    # ==========================================================
+
+    global _LIVE_FEED_CACHE
+
+    try:
+        _LIVE_FEED_CACHE
+    except NameError:
+        _LIVE_FEED_CACHE = {
+            "time": 0,
+            "data": None,
+        }
+
+    now_ts = time.time()
+    LIVE_CACHE_SECONDS = 15 * 60
+
+    # ==========================================================
+    # جلب /api/live فقط عند انتهاء الكاش
+    # ==========================================================
+
+    live_payload = None
+
+    if (
+        _LIVE_FEED_CACHE.get("data") is not None
+        and now_ts - _LIVE_FEED_CACHE.get("time", 0) < LIVE_CACHE_SECONDS
+    ):
+        live_payload = _LIVE_FEED_CACHE["data"]
+
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=25) as client_http:
+
+                r = await client_http.get(
+                    f"{base_url}/api/live",
+                    headers=headers,
+                )
+
+                if r.status_code != 200:
+                    raise HTTPException(
+                        status_code=r.status_code,
+                        detail=r.text
+                    )
+
+                live_payload = r.json()
+
+                _LIVE_FEED_CACHE = {
+                    "time": now_ts,
+                    "data": live_payload,
+                }
+
+        except HTTPException:
+            # إذا كان عندنا بيانات قديمة نعيدها بدل كسر الواجهة
+            if _LIVE_FEED_CACHE.get("data") is not None:
+                live_payload = _LIVE_FEED_CACHE["data"]
+            else:
+                raise
+
+        except Exception as e:
+            logger.exception(
+                "LIVE FEED ERROR: %s",
+                e
             )
 
-        payload = r.json()
+            if _LIVE_FEED_CACHE.get("data") is not None:
+                live_payload = _LIVE_FEED_CACHE["data"]
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"تعذر تحميل المباريات المباشرة: {e}"
+                )
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"SportsAPI Pro live error: {e}")
-        raise HTTPException(
-            status_code=502,
-            detail=f"فشل الاتصال بمصدر المباريات المباشرة: {e}"
+    events = (live_payload or {}).get("events") or []
+
+    # ==========================================================
+    # تفاصيل المباريات
+    #
+    # الأولوية:
+    # 1. MongoDB
+    # 2. Memory cache
+    # 3. SportsAPI /match/{id}
+    #
+    # تفاصيل المباراة لا تحتاج تحديث كل 15 دقيقة.
+    # ==========================================================
+
+    global _LIVE_DETAILS_CACHE
+
+    try:
+        _LIVE_DETAILS_CACHE
+    except NameError:
+        _LIVE_DETAILS_CACHE = {}
+
+    DETAILS_CACHE_SECONDS = 7 * 24 * 60 * 60
+
+    async def get_detail(event_id):
+        key = str(event_id)
+
+        # ------------------------------------------------------
+        # Memory cache
+        # ------------------------------------------------------
+
+        cached = _LIVE_DETAILS_CACHE.get(key)
+
+        if cached:
+            try:
+                if now_ts - cached["time"] < DETAILS_CACHE_SECONDS:
+                    return cached["data"]
+            except Exception:
+                pass
+
+        # ------------------------------------------------------
+        # MongoDB cache
+        # ------------------------------------------------------
+
+        try:
+            cached_doc = await db.live_match_details.find_one(
+                {"_id": key},
+                {"_id": 0, "data": 1, "updated_at": 1},
+            )
+
+            if cached_doc and isinstance(cached_doc.get("data"), dict):
+
+                updated_at = cached_doc.get("updated_at")
+
+                fresh = True
+
+                if updated_at:
+                    try:
+                        if hasattr(updated_at, "timestamp"):
+                            fresh = (
+                                now_ts - updated_at.timestamp()
+                                < DETAILS_CACHE_SECONDS
+                            )
+                    except Exception:
+                        pass
+
+                if fresh:
+                    detail = cached_doc["data"]
+
+                    _LIVE_DETAILS_CACHE[key] = {
+                        "time": now_ts,
+                        "data": detail,
+                    }
+
+                    return detail
+
+        except Exception as e:
+            logger.warning(
+                "LIVE MONGO CACHE READ ERROR %s: %s",
+                event_id,
+                e
+            )
+
+        # ------------------------------------------------------
+        # لا يوجد Cache → طلب واحد فقط للتفاصيل
+        # ------------------------------------------------------
+
+        try:
+            async with httpx.AsyncClient(timeout=25) as client_http:
+
+                rr = await client_http.get(
+                    f"{base_url}/api/match/{event_id}",
+                    headers=headers,
+                )
+
+            if rr.status_code != 200:
+                return None
+
+            data = rr.json()
+
+            if data.get("success") is False:
+                return None
+
+            detail = (
+                data.get("match")
+                or data.get("data", {}).get("event")
+                or data.get("data")
+            )
+
+            if not isinstance(detail, dict):
+                return None
+
+            # Memory
+            _LIVE_DETAILS_CACHE[key] = {
+                "time": now_ts,
+                "data": detail,
+            }
+
+            # MongoDB
+            try:
+                await db.live_match_details.update_one(
+                    {"_id": key},
+                    {
+                        "$set": {
+                            "data": detail,
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    },
+                    upsert=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    "LIVE MONGO CACHE WRITE ERROR %s: %s",
+                    event_id,
+                    e
+                )
+
+            return detail
+
+        except Exception as e:
+            logger.warning(
+                "LIVE DETAIL ERROR %s: %s",
+                event_id,
+                e
+            )
+
+            return None
+
+    # ==========================================================
+    # معالجة المباريات
+    #
+    # مهم:
+    # لا نطلب التفاصيل لكل مباراة بالتوازي إذا كانت موجودة
+    # في MongoDB.
+    # ==========================================================
+
+    result = []
+
+    for event in events:
+
+        event_id = event.get("id")
+
+        if event_id is None:
+            continue
+
+        detail = await get_detail(event_id)
+
+        if not isinstance(detail, dict):
+            detail = {}
+
+        tournament = detail.get("tournament") or {}
+        unique_tournament = tournament.get("uniqueTournament") or {}
+
+        home = detail.get("homeTeam") or {}
+        away = detail.get("awayTeam") or {}
+
+        # ------------------------------------------------------
+        # أسماء الفرق
+        # ------------------------------------------------------
+
+        home_translations = (
+            home.get("fieldTranslations") or {}
+        ).get("nameTranslation") or {}
+
+        away_translations = (
+            away.get("fieldTranslations") or {}
+        ).get("nameTranslation") or {}
+
+        home_ar = (
+            home_translations.get("ar")
+            or home.get("shortName")
+            or home.get("name")
+            or event.get("homeTeam")
+            or "غير معروف"
         )
 
-    items = []
+        away_ar = (
+            away_translations.get("ar")
+            or away.get("shortName")
+            or away.get("name")
+            or event.get("awayTeam")
+            or "غير معروف"
+        )
 
-    for event in payload.get("events", []):
-        tournament = event.get("tournament") or ""
+        home_en = (
+            home.get("name")
+            or event.get("homeTeam")
+            or "Unknown"
+        )
 
-        home_team = event.get("homeTeam") or ""
-        away_team = event.get("awayTeam") or ""
+        away_en = (
+            away.get("name")
+            or event.get("awayTeam")
+            or "Unknown"
+        )
 
-        home_score = event.get("homeScore")
-        away_score = event.get("awayScore")
+        # ------------------------------------------------------
+        # IDs
+        # ------------------------------------------------------
 
-        status_value = event.get("status") or "live"
+        home_id = home.get("id")
+        away_id = away.get("id")
+        tournament_id = unique_tournament.get("id")
 
-        start_timestamp = event.get("startTimestamp")
+        # ------------------------------------------------------
+        # شعارات الفرق
+        # ------------------------------------------------------
 
-        date_value = None
-        if start_timestamp:
+        home_logo = (
+            f"{base_url}/images/teams/{home_id}"
+            if home_id else None
+        )
+
+        away_logo = (
+            f"{base_url}/images/teams/{away_id}"
+            if away_id else None
+        )
+
+        # ------------------------------------------------------
+        # اسم البطولة العربي
+        # ------------------------------------------------------
+
+        tournament_translations = (
+            unique_tournament.get("fieldTranslations") or {}
+        ).get("nameTranslation") or {}
+
+        tournament_ar = (
+            tournament_translations.get("ar")
+            or (
+                tournament.get("fieldTranslations") or {}
+            ).get("nameTranslation", {}).get("ar")
+            or unique_tournament.get("name")
+            or tournament.get("name")
+            or event.get("tournament")
+            or "مباراة مباشرة"
+        )
+
+        tournament_en = (
+            unique_tournament.get("name")
+            or tournament.get("name")
+            or event.get("tournament")
+            or "Live"
+        )
+
+        # ------------------------------------------------------
+        # شعار البطولة
+        # ------------------------------------------------------
+
+        league_logo = (
+            f"{base_url}/images/tournaments/{tournament_id}"
+            if tournament_id else None
+        )
+
+        # ------------------------------------------------------
+        # النتيجة
+        #
+        # نأخذ النتيجة الحالية من /live أولًا.
+        # ------------------------------------------------------
+
+        hs = detail.get("homeScore") or {}
+        aws = detail.get("awayScore") or {}
+
+        home_score = hs.get(
+            "current",
+            event.get("homeScore", 0)
+        )
+
+        away_score = aws.get(
+            "current",
+            event.get("awayScore", 0)
+        )
+
+        # إذا لم توجد التفاصيل أو كانت قديمة
+        if home_score is None:
+            home_score = event.get("homeScore", 0)
+
+        if away_score is None:
+            away_score = event.get("awayScore", 0)
+
+        # ------------------------------------------------------
+        # الحالة
+        # ------------------------------------------------------
+
+        status_obj = detail.get("status") or {}
+
+        status_text = (
+            status_obj.get("description")
+            or event.get("status")
+            or "Live"
+        )
+
+        # ------------------------------------------------------
+        # الدقيقة
+        # ------------------------------------------------------
+
+        elapsed = None
+
+        time_obj = detail.get("time") or {}
+
+        if time_obj.get("current") is not None:
             try:
-                date_value = datetime.fromtimestamp(
-                    int(start_timestamp),
-                    tz=timezone.utc
-                ).isoformat()
+                elapsed = int(time_obj.get("current"))
             except Exception:
-                date_value = None
+                elapsed = None
 
-        # حساب دقيقة المباراة من startTimestamp
-        elapsed_value = None
-        if start_timestamp:
+        if elapsed is None:
+            status_time = detail.get("statusTime") or {}
+
             try:
-                now_utc = datetime.now(timezone.utc)
-                kickoff = datetime.fromtimestamp(
-                    int(start_timestamp),
-                    tz=timezone.utc
-                )
-                minutes_since_kickoff = max(
-                    0,
-                    int((now_utc - kickoff).total_seconds() // 60)
-                )
+                initial = status_time.get("initial")
+                start = detail.get("currentPeriodStartTimestamp")
 
-                status_lower = str(status_value).strip().lower()
-
-                if "1st half" in status_lower:
-                    elapsed_value = min(minutes_since_kickoff + 1, 45)
-
-                elif "halftime" in status_lower or "half time" in status_lower:
-                    elapsed_value = 45
-
-                elif "2nd half" in status_lower:
-                    elapsed_value = min(
-                        max(minutes_since_kickoff - 15, 45) + 1,
-                        90
+                if initial is not None and start:
+                    elapsed = max(
+                        0,
+                        int(
+                            (
+                                time.time()
+                                - float(start)
+                            ) / 60
+                        )
                     )
+            except Exception:
+                elapsed = None
 
-                elif "extra" in status_lower:
-                    elapsed_value = min(
-                        max(minutes_since_kickoff - 30, 90) + 1,
-                        120
-                    )
+        # ------------------------------------------------------
+        # النتيجة النهائية
+        # ------------------------------------------------------
 
-            except Exception as e:
-                print(f"Live elapsed calculation failed: {e}")
+        result.append({
+            "id": event_id,
 
-        items.append({
-            "id": event.get("id"),
+            "home_team": home_ar,
+            "away_team": away_ar,
 
-            "league": league_ar_name(tournament),
-            "league_en": tournament,
-            "league_id": event.get("tournamentId"),
+            "home_team_name_ar": home_ar,
+            "away_team_name_ar": away_ar,
 
-            "country": None,
-            "league_logo": None,
+            "home_team_name_en": home_en,
+            "away_team_name_en": away_en,
 
-            "home_team": team_ar_name(home_team),
-            "away_team": team_ar_name(away_team),
+            "home_logo": home_logo,
+            "away_logo": away_logo,
 
-            "home_team_en": home_team,
-            "away_team_en": away_team,
+            "home_team_id": home_id,
+            "away_team_id": away_id,
 
-            "home_logo": None,
-            "away_logo": None,
+            "league": tournament_ar,
+            "league_name_ar": tournament_ar,
+            "league_name_en": tournament_en,
+
+            "league_logo": league_logo,
+            "league_id": tournament_id,
 
             "home_score": home_score,
             "away_score": away_score,
 
-            "elapsed": elapsed_value,
-            "status": status_value,
-            "status_long": status_value,
+            "status": status_text,
+            "elapsed": elapsed,
 
-            "date": date_value,
-            "startTimestamp": start_timestamp,
+            "startTimestamp": event.get(
+                "startTimestamp"
+            ),
 
             "slug": event.get("slug"),
         })
 
-    return items
+    return {
+        "success": True,
+        "count": len(result),
+        "events": result,
+    }
+
 
 @api_router.post("/admin/import-new-fixtures")
 async def import_new_fixtures(_admin=Depends(require_admin)):
