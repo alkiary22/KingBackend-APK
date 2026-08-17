@@ -6389,498 +6389,578 @@ async def seed_test_live(current_user=Depends(require_admin)):
 
 
 
+
+# ==========================================================
+# SPORTSSCORE LIVE SOURCE
+# ==========================================================
+
+_SPORTSCORE_LIVE_CACHE = {
+    "time": 0,
+    "data": None,
+}
+
+_SPORTSCORE_LIVE_CACHE_SECONDS = 45
+
+async def _fetch_sportscore_live():
+    import re
+    import html
+    import time
+
+    url = "https://sportscore.com/ar/football/?filter=live"
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 11) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Mobile Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ar,en;q=0.9",
+    }
+
+    now = time.time()
+
+    # ------------------------------------------------------
+    # SERVER CACHE
+    # ------------------------------------------------------
+    if (
+        _SPORTSCORE_LIVE_CACHE.get("data") is not None
+        and now - _SPORTSCORE_LIVE_CACHE.get("time", 0)
+        < _SPORTSCORE_LIVE_CACHE_SECONDS
+    ):
+        return _SPORTSCORE_LIVE_CACHE["data"]
+
+    async with httpx.AsyncClient(
+        timeout=30,
+        headers=headers,
+        follow_redirects=True,
+    ) as client:
+
+        response = await client.get(url)
+        response.raise_for_status()
+
+    page = response.text
+
+    def clean(value):
+        if not value:
+            return None
+
+        value = html.unescape(value)
+        value = re.sub(r"\s+", " ", value)
+
+        return value.strip()
+
+    # ------------------------------------------------------
+    # نفس الـParser الذي تم اختباره بنجاح
+    # ------------------------------------------------------
+    pattern = re.compile(
+        r'<div[^>]+class="[^"]*d-flex align-items-center[^"]*"'
+        r'[^>]+data-match-id="([^"]+)"[^>]+data-live-row[^>]*>'
+        r'(.*?)'
+        r'</div>\s*</div>\s*</div>',
+        re.S,
+    )
+
+    blocks = pattern.findall(page)
+
+    matches = []
+
+    for match_id, block in blocks:
+
+        home = re.search(
+            r'data-live="home-score">\s*(?:<b>)?(\d+)',
+            block,
+            re.S,
+        )
+
+        away = re.search(
+            r'data-live="away-score">\s*(?:<b>)?(\d+)',
+            block,
+            re.S,
+        )
+
+        status_match = re.search(
+            r'data-live="status">\s*([^<]+)',
+            block,
+            re.S,
+        )
+
+        teams = re.findall(
+            r'class="sc-team-link[^"]*"'
+            r'[^>]*title="[^"]*hub">([^<]+)</a>',
+            block,
+            re.S,
+        )
+
+        logos = re.findall(
+            r'<img[^>]+class="icon-circuit"[^>]+src="([^"]+)"',
+            block,
+            re.S,
+        )
+
+        if len(teams) < 2:
+            continue
+
+        # --------------------------------------------------
+        # Match URL
+        # --------------------------------------------------
+        match_url = None
+
+        url_match = re.search(
+            r'href="(/ar/football/match/[^"]+/)"',
+            block,
+            re.S,
+        )
+
+        if url_match:
+            match_url = "https://sportscore.com" + url_match.group(1)
+
+        # --------------------------------------------------
+        # وقت المباراة
+        # --------------------------------------------------
+        utc_match = re.search(
+            r'data-utc="([^"]+)"',
+            block,
+            re.S,
+        )
+
+        start_time = utc_match.group(1) if utc_match else None
+
+        # --------------------------------------------------
+        # الدقيقة
+        # --------------------------------------------------
+        elapsed = None
+
+        if status_match:
+            raw_status = clean(status_match.group(1))
+
+            if raw_status:
+                minute_match = re.search(r'(\d+)', raw_status)
+
+                if minute_match:
+                    try:
+                        elapsed = int(minute_match.group(1))
+                    except Exception:
+                        elapsed = None
+
+        # --------------------------------------------------
+        # اسم البطولة
+        # --------------------------------------------------
+        competition = None
+
+        competition_match = re.search(
+            r'class="competition-name[^"]*"[^>]*>'
+            r'\s*([^<]+?)\s*</a>',
+            block,
+            re.S,
+        )
+
+        if competition_match:
+            competition = clean(competition_match.group(1))
+
+        # بعض صفحات SportScore تضع البطولة خارج block المباراة.
+        # في هذه الحالة نبحث في جزء قريب من المباراة.
+        if not competition:
+            nearby = page[max(0, page.find(match_id) - 5000):page.find(match_id) + 500]
+
+            competition_match = re.search(
+                r'class="competition-name[^"]*"[^>]*>'
+                r'\s*([^<]+?)\s*</a>',
+                nearby,
+                re.S,
+            )
+
+            if competition_match:
+                competition = clean(competition_match.group(1))
+
+        matches.append({
+            "id": match_id,
+
+            "home_team": clean(teams[0]),
+            "away_team": clean(teams[1]),
+
+            "home_team_name_ar": clean(teams[0]),
+            "away_team_name_ar": clean(teams[1]),
+
+            "home_team_name_en": clean(teams[0]),
+            "away_team_name_en": clean(teams[1]),
+
+            "home_logo": logos[0] if len(logos) > 0 else None,
+            "away_logo": logos[1] if len(logos) > 1 else None,
+
+            "home_team_id": None,
+            "away_team_id": None,
+
+            "league": competition or "مباراة مباشرة",
+            "league_name_ar": competition or "مباراة مباشرة",
+            "league_name_en": competition or "Live",
+
+            "league_logo": None,
+            "league_id": None,
+
+            "home_score": (
+                int(home.group(1))
+                if home
+                else None
+            ),
+
+            "away_score": (
+                int(away.group(1))
+                if away
+                else None
+            ),
+
+            "status": (
+                clean(status_match.group(1))
+                if status_match
+                else "Live"
+            ),
+
+            "elapsed": elapsed,
+
+            "startTimestamp": start_time,
+
+            "slug": (
+                match_url.replace(
+                    "https://sportscore.com/ar/football/match/",
+                    ""
+                ).strip("/")
+                if match_url
+                else None
+            ),
+
+            "url": match_url,
+        })
+
+    payload = {
+        "success": True,
+        "count": len(matches),
+        "events": matches,
+        "source": "sportscore",
+        "updated": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ).isoformat(),
+    }
+
+    _SPORTSCORE_LIVE_CACHE["time"] = now
+    _SPORTSCORE_LIVE_CACHE["data"] = payload
+
+    return payload
+
+
 @api_router.get("/external/live-matches")
 async def external_live_matches(all: bool = False):
     """
     Live Center
 
-    - SportsAPI /live يتم استدعاؤه بشكل محدود جدًا.
-    - بيانات الـLive يتم تخزينها مؤقتًا على مستوى السيرفر.
-    - تفاصيل المباريات والشعارات والأسماء العربية تحفظ في MongoDB.
-    - لا يتم طلب /api/match/{id} في كل تحديث.
-    """
+    المصدر الأساسي:
+    SportScore Live HTML
 
-    api_key = os.environ.get("API_FOOTBALL_LIVE_KEY", "").strip()
+    الكاش:
+    45 ثانية على مستوى السيرفر.
 
-    if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="API_FOOTBALL_LIVE_KEY غير موجود"
-        )
-
-    base_url = "https://v2.football.sportsapipro.com"
-
-    headers = {
-        "x-api-key": api_key,
-        "Accept": "application/json",
+    نفس صيغة API القديمة:
+    {
+        success,
+        count,
+        events
     }
+
+    لا يتم لمس نظام النقاط أو التوقعات أو المستخدمين.
+    """
 
     import time
 
-    # ==========================================================
-    # SERVER LIVE CACHE
-    # يمنع كل مستخدم من استهلاك طلب جديد من SportsAPI
-    # 15 دقيقة = بحد أقصى 96 طلب Live في 24 ساعة
-    # ==========================================================
+    try:
+        payload = await _fetch_sportscore_live()
 
-    global _LIVE_FEED_CACHE
+        return payload
+
+    except Exception as e:
+
+        logger.exception(
+            "SPORTSCORE LIVE ERROR: %s",
+            e,
+        )
+
+        # --------------------------------------------------
+        # في حالة فشل SportScore:
+        # أعد آخر بيانات ناجحة إن وجدت.
+        # --------------------------------------------------
+        cached = _SPORTSCORE_LIVE_CACHE.get("data")
+
+        if cached is not None:
+            cached = dict(cached)
+            cached["stale"] = True
+            return cached
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"تعذر تحميل المباريات المباشرة من SportScore: {e}",
+        )
+
+
+
+
+
+# ==========================================================
+# SPORTSSCORE LIVE MATCH DETAILS
+# ==========================================================
+
+_SPORTSCORE_MATCH_DETAILS_CACHE = {}
+_SPORTSCORE_MATCH_DETAILS_CACHE_SECONDS = 10
+
+
+async def _fetch_sportscore_live_detail(slug: str):
+    """
+    يجلب صفحة:
+    https://sportscore.com/ar/football/match/{slug}/live/
+
+    الصفحة ترجع JSON مباشر يحتوي:
+    status / score / stats / latest_events
+    """
+
+    import time
+
+    slug = str(slug or "").strip().strip("/")
+
+    if not slug or not re.fullmatch(r"[A-Za-z0-9_-]+-vs-[A-Za-z0-9_-]+", slug):
+        raise HTTPException(
+            status_code=400,
+            detail="slug المباراة غير صالح"
+        )
+
+    now = time.time()
+
+    cached = _SPORTSCORE_MATCH_DETAILS_CACHE.get(slug)
+
+    if cached:
+        try:
+            if (
+                now - cached.get("time", 0)
+                < _SPORTSCORE_MATCH_DETAILS_CACHE_SECONDS
+            ):
+                return cached.get("data")
+        except Exception:
+            pass
+
+    url = (
+        "https://sportscore.com/ar/football/match/"
+        f"{slug}/live/"
+    )
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 11) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Mobile Safari/537.36"
+        ),
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "ar,en;q=0.9",
+        "Referer": (
+            "https://sportscore.com/ar/football/"
+        ),
+    }
+
+    async with httpx.AsyncClient(
+        timeout=20,
+        headers=headers,
+        follow_redirects=True,
+    ) as client:
+
+        response = await client.get(url)
+
+    response.raise_for_status()
+
+    raw = response.text.strip()
 
     try:
-        _LIVE_FEED_CACHE
-    except NameError:
-        _LIVE_FEED_CACHE = {
-            "time": 0,
-            "data": None,
-        }
-
-    now_ts = time.time()
-    LIVE_CACHE_SECONDS = 15 * 60
-
-    # ==========================================================
-    # جلب /api/live فقط عند انتهاء الكاش
-    # ==========================================================
-
-    live_payload = None
-
-    if (
-        _LIVE_FEED_CACHE.get("data") is not None
-        and now_ts - _LIVE_FEED_CACHE.get("time", 0) < LIVE_CACHE_SECONDS
-    ):
-        live_payload = _LIVE_FEED_CACHE["data"]
-
-    else:
+        payload = response.json()
+    except Exception:
         try:
-            async with httpx.AsyncClient(timeout=25) as client_http:
-
-                r = await client_http.get(
-                    f"{base_url}/api/live",
-                    headers=headers,
-                )
-
-                if r.status_code != 200:
-                    raise HTTPException(
-                        status_code=r.status_code,
-                        detail=r.text
-                    )
-
-                live_payload = r.json()
-
-                _LIVE_FEED_CACHE = {
-                    "time": now_ts,
-                    "data": live_payload,
-                }
-
-        except HTTPException:
-            # إذا كان عندنا بيانات قديمة نعيدها بدل كسر الواجهة
-            if _LIVE_FEED_CACHE.get("data") is not None:
-                live_payload = _LIVE_FEED_CACHE["data"]
-            else:
-                raise
-
+            import json
+            payload = json.loads(raw)
         except Exception as e:
-            logger.exception(
-                "LIVE FEED ERROR: %s",
-                e
+            raise HTTPException(
+                status_code=502,
+                detail=f"SportScore live detail returned invalid JSON: {e}"
             )
 
-            if _LIVE_FEED_CACHE.get("data") is not None:
-                live_payload = _LIVE_FEED_CACHE["data"]
-            else:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"تعذر تحميل المباريات المباشرة: {e}"
-                )
-
-    events = (live_payload or {}).get("events") or []
-
-    # ==========================================================
-    # تفاصيل المباريات
-    #
-    # الأولوية:
-    # 1. MongoDB
-    # 2. Memory cache
-    # 3. SportsAPI /match/{id}
-    #
-    # تفاصيل المباراة لا تحتاج تحديث كل 15 دقيقة.
-    # ==========================================================
-
-    global _LIVE_DETAILS_CACHE
-
-    try:
-        _LIVE_DETAILS_CACHE
-    except NameError:
-        _LIVE_DETAILS_CACHE = {}
-
-    DETAILS_CACHE_SECONDS = 7 * 24 * 60 * 60
-
-    async def get_detail(event_id):
-        key = str(event_id)
-
-        # ------------------------------------------------------
-        # Memory cache
-        # ------------------------------------------------------
-
-        cached = _LIVE_DETAILS_CACHE.get(key)
-
-        if cached:
-            try:
-                if now_ts - cached["time"] < DETAILS_CACHE_SECONDS:
-                    return cached["data"]
-            except Exception:
-                pass
-
-        # ------------------------------------------------------
-        # MongoDB cache
-        # ------------------------------------------------------
-
-        try:
-            cached_doc = await db.live_match_details.find_one(
-                {"_id": key},
-                {"_id": 0, "data": 1, "updated_at": 1},
-            )
-
-            if cached_doc and isinstance(cached_doc.get("data"), dict):
-
-                updated_at = cached_doc.get("updated_at")
-
-                fresh = True
-
-                if updated_at:
-                    try:
-                        if hasattr(updated_at, "timestamp"):
-                            fresh = (
-                                now_ts - updated_at.timestamp()
-                                < DETAILS_CACHE_SECONDS
-                            )
-                    except Exception:
-                        pass
-
-                if fresh:
-                    detail = cached_doc["data"]
-
-                    _LIVE_DETAILS_CACHE[key] = {
-                        "time": now_ts,
-                        "data": detail,
-                    }
-
-                    return detail
-
-        except Exception as e:
-            logger.warning(
-                "LIVE MONGO CACHE READ ERROR %s: %s",
-                event_id,
-                e
-            )
-
-        # ------------------------------------------------------
-        # لا يوجد Cache → طلب واحد فقط للتفاصيل
-        # ------------------------------------------------------
-
-        try:
-            async with httpx.AsyncClient(timeout=25) as client_http:
-
-                rr = await client_http.get(
-                    f"{base_url}/api/match/{event_id}",
-                    headers=headers,
-                )
-
-            if rr.status_code != 200:
-                return None
-
-            data = rr.json()
-
-            if data.get("success") is False:
-                return None
-
-            detail = (
-                data.get("match")
-                or data.get("data", {}).get("event")
-                or data.get("data")
-            )
-
-            if not isinstance(detail, dict):
-                return None
-
-            # Memory
-            _LIVE_DETAILS_CACHE[key] = {
-                "time": now_ts,
-                "data": detail,
-            }
-
-            # MongoDB
-            try:
-                await db.live_match_details.update_one(
-                    {"_id": key},
-                    {
-                        "$set": {
-                            "data": detail,
-                            "updated_at": datetime.now(timezone.utc),
-                        }
-                    },
-                    upsert=True,
-                )
-            except Exception as e:
-                logger.warning(
-                    "LIVE MONGO CACHE WRITE ERROR %s: %s",
-                    event_id,
-                    e
-                )
-
-            return detail
-
-        except Exception as e:
-            logger.warning(
-                "LIVE DETAIL ERROR %s: %s",
-                event_id,
-                e
-            )
-
-            return None
-
-    # ==========================================================
-    # معالجة المباريات
-    #
-    # مهم:
-    # لا نطلب التفاصيل لكل مباراة بالتوازي إذا كانت موجودة
-    # في MongoDB.
-    # ==========================================================
-
-    result = []
-
-    for event in events:
-
-        event_id = event.get("id")
-
-        if event_id is None:
-            continue
-
-        detail = await get_detail(event_id)
-
-        if not isinstance(detail, dict):
-            detail = {}
-
-        tournament = detail.get("tournament") or {}
-        unique_tournament = tournament.get("uniqueTournament") or {}
-
-        home = detail.get("homeTeam") or {}
-        away = detail.get("awayTeam") or {}
-
-        # ------------------------------------------------------
-        # أسماء الفرق
-        # ------------------------------------------------------
-
-        home_translations = (
-            home.get("fieldTranslations") or {}
-        ).get("nameTranslation") or {}
-
-        away_translations = (
-            away.get("fieldTranslations") or {}
-        ).get("nameTranslation") or {}
-
-        home_ar = (
-            home_translations.get("ar")
-            or home.get("shortName")
-            or home.get("name")
-            or event.get("homeTeam")
-            or "غير معروف"
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="SportScore live detail response is not an object"
         )
 
-        away_ar = (
-            away_translations.get("ar")
-            or away.get("shortName")
-            or away.get("name")
-            or event.get("awayTeam")
-            or "غير معروف"
-        )
+    # ------------------------------------------------------
+    # البيانات الأساسية
+    # ------------------------------------------------------
 
-        home_en = (
-            home.get("name")
-            or event.get("homeTeam")
-            or "Unknown"
-        )
+    status_obj = payload.get("status") or {}
+    score = payload.get("score") or {}
+    stats = payload.get("stats") or {}
+    latest_events = payload.get("latest_events") or []
 
-        away_en = (
-            away.get("name")
-            or event.get("awayTeam")
-            or "Unknown"
-        )
+    result = {
+        "success": True,
+        "source": "sportscore",
 
-        # ------------------------------------------------------
-        # IDs
-        # ------------------------------------------------------
+        "slug": slug,
+        "url": url,
 
-        home_id = home.get("id")
-        away_id = away.get("id")
-        tournament_id = unique_tournament.get("id")
+        "status": status_obj.get("label"),
+        "status_id": status_obj.get("id"),
+        "is_live": bool(status_obj.get("is_live")),
+        "is_finished": bool(status_obj.get("is_finished")),
+        "is_not_started": bool(status_obj.get("is_not_started")),
 
-        # ------------------------------------------------------
-        # شعارات الفرق
-        # ------------------------------------------------------
+        "home_score": score.get("home"),
+        "away_score": score.get("away"),
+        "home_score_display": score.get("home_display"),
+        "away_score_display": score.get("away_display"),
+        "home_halftime": score.get("home_halftime"),
+        "away_halftime": score.get("away_halftime"),
 
-        home_logo = (
-            f"{base_url}/images/teams/{home_id}"
-            if home_id else None
-        )
+        "stats": {
+            "home_corners": stats.get("home_corners"),
+            "away_corners": stats.get("away_corners"),
 
-        away_logo = (
-            f"{base_url}/images/teams/{away_id}"
-            if away_id else None
-        )
+            "home_yellow_cards": stats.get("home_yellow_cards"),
+            "away_yellow_cards": stats.get("away_yellow_cards"),
 
-        # ------------------------------------------------------
-        # اسم البطولة العربي
-        # ------------------------------------------------------
+            "home_red_cards": stats.get("home_red_cards"),
+            "away_red_cards": stats.get("away_red_cards"),
 
-        tournament_translations = (
-            unique_tournament.get("fieldTranslations") or {}
-        ).get("nameTranslation") or {}
+            "home_ball_possession": stats.get("home_ball_possession"),
+            "away_ball_possession": stats.get("away_ball_possession"),
 
-        tournament_ar = (
-            tournament_translations.get("ar")
-            or (
-                tournament.get("fieldTranslations") or {}
-            ).get("nameTranslation", {}).get("ar")
-            or unique_tournament.get("name")
-            or tournament.get("name")
-            or event.get("tournament")
-            or "مباراة مباشرة"
-        )
+            "home_attacks": stats.get("home_attacks"),
+            "away_attacks": stats.get("away_attacks"),
 
-        tournament_en = (
-            unique_tournament.get("name")
-            or tournament.get("name")
-            or event.get("tournament")
-            or "Live"
-        )
-
-        # ------------------------------------------------------
-        # شعار البطولة
-        # ------------------------------------------------------
-
-        league_logo = (
-            f"{base_url}/images/tournaments/{tournament_id}"
-            if tournament_id else None
-        )
-
-        # ------------------------------------------------------
-        # النتيجة
-        #
-        # نأخذ النتيجة الحالية من /live أولًا.
-        # ------------------------------------------------------
-
-        hs = detail.get("homeScore") or {}
-        aws = detail.get("awayScore") or {}
-
-        home_score = hs.get(
-            "current",
-            event.get("homeScore", 0)
-        )
-
-        away_score = aws.get(
-            "current",
-            event.get("awayScore", 0)
-        )
-
-        # إذا لم توجد التفاصيل أو كانت قديمة
-        if home_score is None:
-            home_score = event.get("homeScore", 0)
-
-        if away_score is None:
-            away_score = event.get("awayScore", 0)
-
-        # ------------------------------------------------------
-        # الحالة
-        # ------------------------------------------------------
-
-        status_obj = detail.get("status") or {}
-
-        status_text = (
-            status_obj.get("description")
-            or event.get("status")
-            or "Live"
-        )
-
-        # ------------------------------------------------------
-        # الدقيقة
-        # ------------------------------------------------------
-
-        elapsed = None
-
-        time_obj = detail.get("time") or {}
-
-        if time_obj.get("current") is not None:
-            try:
-                elapsed = int(time_obj.get("current"))
-            except Exception:
-                elapsed = None
-
-        if elapsed is None:
-            status_time = detail.get("statusTime") or {}
-
-            try:
-                initial = status_time.get("initial")
-                start = detail.get("currentPeriodStartTimestamp")
-
-                if initial is not None and start:
-                    elapsed = max(
-                        0,
-                        int(
-                            (
-                                time.time()
-                                - float(start)
-                            ) / 60
-                        )
-                    )
-            except Exception:
-                elapsed = None
-
-        # ------------------------------------------------------
-        # النتيجة النهائية
-        # ------------------------------------------------------
-
-        result.append({
-            "id": event_id,
-
-            "home_team": home_ar,
-            "away_team": away_ar,
-
-            "home_team_name_ar": home_ar,
-            "away_team_name_ar": away_ar,
-
-            "home_team_name_en": home_en,
-            "away_team_name_en": away_en,
-
-            "home_logo": home_logo,
-            "away_logo": away_logo,
-
-            "home_team_id": home_id,
-            "away_team_id": away_id,
-
-            "league": tournament_ar,
-            "league_name_ar": tournament_ar,
-            "league_name_en": tournament_en,
-
-            "league_logo": league_logo,
-            "league_id": tournament_id,
-
-            "home_score": home_score,
-            "away_score": away_score,
-
-            "status": status_text,
-            "elapsed": elapsed,
-
-            "startTimestamp": event.get(
-                "startTimestamp"
+            "home_dangerous_attacks": stats.get(
+                "home_dangerous_attacks"
+            ),
+            "away_dangerous_attacks": stats.get(
+                "away_dangerous_attacks"
             ),
 
-            "slug": event.get("slug"),
-        })
+            "home_shots_on_target": stats.get(
+                "home_shots_on_target"
+            ),
+            "away_shots_on_target": stats.get(
+                "away_shots_on_target"
+            ),
 
-    return {
-        "success": True,
-        "count": len(result),
-        "events": result,
+            "home_shots_off_target": stats.get(
+                "home_shots_off_target"
+            ),
+            "away_shots_off_target": stats.get(
+                "away_shots_off_target"
+            ),
+
+            "has_realtime_stats": bool(
+                stats.get("has_realtime_stats")
+            ),
+        },
+
+        "latest_events": latest_events,
+
+        "updated_at": payload.get("updated_at"),
     }
+
+    _SPORTSCORE_MATCH_DETAILS_CACHE[slug] = {
+        "time": now,
+        "data": result,
+    }
+
+    return result
+
+
+@api_router.get("/external/live-match/{slug}")
+async def external_live_match_detail(slug: str):
+    """
+    تفاصيل مباراة Live واحدة من SportScore.
+
+    مثال:
+    /api/external/live-match/pisa-vs-empoli
+    """
+
+    try:
+        detail = await _fetch_sportscore_live_detail(slug)
+
+        # --------------------------------------------------
+        # نحاول إرفاق بيانات المباراة الموجودة في Live Center
+        # بدون إجراء طلب إضافي إلى SportScore.
+        # --------------------------------------------------
+
+        try:
+            live_payload = _SPORTSCORE_LIVE_CACHE.get("data")
+
+            if isinstance(live_payload, dict):
+                for match in live_payload.get("events", []):
+                    if match.get("slug") == slug:
+                        detail["id"] = match.get("id")
+                        detail["home_team"] = match.get("home_team")
+                        detail["away_team"] = match.get("away_team")
+
+                        detail["home_team_name_ar"] = (
+                            match.get("home_team_name_ar")
+                            or match.get("home_team")
+                        )
+
+                        detail["away_team_name_ar"] = (
+                            match.get("away_team_name_ar")
+                            or match.get("away_team")
+                        )
+
+                        detail["home_logo"] = match.get("home_logo")
+                        detail["away_logo"] = match.get("away_logo")
+
+                        detail["league"] = (
+                            match.get("league_name_ar")
+                            or match.get("league")
+                        )
+
+                        detail["league_name_ar"] = (
+                            match.get("league_name_ar")
+                            or match.get("league")
+                        )
+
+                        detail["league_name_en"] = (
+                            match.get("league_name_en")
+                            or match.get("league")
+                        )
+
+                        detail["league_logo"] = match.get("league_logo")
+                        detail["league_id"] = match.get("league_id")
+                        detail["startTimestamp"] = match.get(
+                            "startTimestamp"
+                        )
+
+                        break
+
+        except Exception as e:
+            logger.warning(
+                "SPORTSCORE LIVE LIST MERGE ERROR: %s",
+                e
+            )
+
+        return detail
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(
+            "SPORTSCORE LIVE MATCH DETAIL ERROR: %s",
+            e
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"تعذر تحميل تفاصيل المباراة من SportScore: {e}"
+        )
+
 
 
 @api_router.post("/admin/import-new-fixtures")
