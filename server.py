@@ -1490,6 +1490,16 @@ class MatchModel(BaseModel):
     id: str
     home_team: str
     away_team: str
+
+    # أسماء الفرق محفوظة مع المباراة لضمان ثبات الاسم العربي
+    # وعدم الاعتماد على ترجمة/ترانسلِت لاحقة.
+    home_team_name_ar: Optional[str] = None
+    home_team_name_en: Optional[str] = None
+    home_team_logo: Optional[str] = None
+    away_team_name_ar: Optional[str] = None
+    away_team_name_en: Optional[str] = None
+    away_team_logo: Optional[str] = None
+
     match_date: str
     kickoff: str
     competition: str = "worldcup"
@@ -2098,8 +2108,42 @@ async def list_matches(date: Optional[str] = None):
         if home:
             m["home"] = home
 
+            # الاسم المحفوظ في المباراة له الأولوية،
+            # ثم الاسم العربي من سجل الفريق.
+            m["home_team_name_ar"] = (
+                m.get("home_team_name_ar")
+                or home.get("name_ar")
+                or home.get("name_en")
+                or m.get("home_team")
+            )
+            m["home_team_name_en"] = (
+                m.get("home_team_name_en")
+                or home.get("name_en")
+                or m.get("home_team_name_ar")
+            )
+            m["home_team_logo"] = (
+                m.get("home_team_logo")
+                or home.get("logo")
+            )
+
         if away:
             m["away"] = away
+
+            m["away_team_name_ar"] = (
+                m.get("away_team_name_ar")
+                or away.get("name_ar")
+                or away.get("name_en")
+                or m.get("away_team")
+            )
+            m["away_team_name_en"] = (
+                m.get("away_team_name_en")
+                or away.get("name_en")
+                or m.get("away_team_name_ar")
+            )
+            m["away_team_logo"] = (
+                m.get("away_team_logo")
+                or away.get("logo")
+            )
 
         result.append(m)
 
@@ -2123,8 +2167,42 @@ async def list_matches(date: Optional[str] = None):
         if home:
             m["home"] = home
 
+            # الاسم العربي المحفوظ في المباراة أولاً،
+            # ثم الاسم العربي من سجل الفريق.
+            m["home_team_name_ar"] = (
+                m.get("home_team_name_ar")
+                or home.get("name_ar")
+                or home.get("name_en")
+                or m.get("home_team")
+            )
+            m["home_team_name_en"] = (
+                m.get("home_team_name_en")
+                or home.get("name_en")
+                or m.get("home_team_name_ar")
+            )
+            m["home_team_logo"] = (
+                m.get("home_team_logo")
+                or home.get("logo")
+            )
+
         if away:
             m["away"] = away
+
+            m["away_team_name_ar"] = (
+                m.get("away_team_name_ar")
+                or away.get("name_ar")
+                or away.get("name_en")
+                or m.get("away_team")
+            )
+            m["away_team_name_en"] = (
+                m.get("away_team_name_en")
+                or away.get("name_en")
+                or m.get("away_team_name_ar")
+            )
+            m["away_team_logo"] = (
+                m.get("away_team_logo")
+                or away.get("logo")
+            )
 
         result.append(m)
 
@@ -2515,6 +2593,16 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
         "id": str(uuid.uuid4()),
         "home_team": data.home_team,
         "away_team": data.away_team,
+
+        # احفظ الاسم العربي الأصلي القادم من بيانات البطولة.
+        # هذا يمنع ظهور أسماء مترجمة/منطوقة آليًا لاحقًا.
+        "home_team_name_ar": getattr(data, "home_team_name_ar", None),
+        "home_team_name_en": getattr(data, "home_team_name_en", None),
+        "home_team_logo": getattr(data, "home_team_logo", None),
+        "away_team_name_ar": getattr(data, "away_team_name_ar", None),
+        "away_team_name_en": getattr(data, "away_team_name_en", None),
+        "away_team_logo": getattr(data, "away_team_logo", None),
+
         "match_date": data.match_date,
         "kickoff": data.kickoff,
         # keep legacy compatibility
