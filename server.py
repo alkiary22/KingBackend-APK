@@ -3424,9 +3424,28 @@ async def leaderboard(period: str = "all"):
     now = datetime.now(timezone.utc)
 
     if period == "weekly":
-        period_start = now - timedelta(days=7)
+        # الأسبوع يبدأ يوم الجمعة وينتهي يوم الخميس.
+        days_since_friday = (now.weekday() - 4) % 7
+
+        period_start = (
+            now - timedelta(days=days_since_friday)
+        ).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+
     elif period == "monthly":
-        period_start = now - timedelta(days=30)
+        # الشهر يبدأ من أول يوم في الشهر الساعة 00:00.
+        period_start = now.replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+
     else:
         period_start = None
 
@@ -3440,25 +3459,62 @@ async def leaderboard(period: str = "all"):
         }
     ]
 
-    # في الأسبوعي/الشهري نحسب فقط توقعات الفترة.
+    # الأسبوعي/الشهري يعتمد على وقت احتساب نتيجة المباراة،
+    # وليس وقت إنشاء التوقع.
+    #
+    # لا يتم تعديل points أو total_points أو نتائج المباريات.
     if period_start is not None:
-        lookup_pipeline.append({
-            "$match": {
-                "$expr": {
-                    "$gte": [
+        lookup_pipeline.extend([
+            {
+                "$lookup": {
+                    "from": "matches",
+                    "let": {"prediction_match_id": "$match_id"},
+                    "pipeline": [
                         {
-                            "$convert": {
-                                "input": "$created_at",
-                                "to": "date",
-                                "onError": datetime(1970, 1, 1, tzinfo=timezone.utc),
-                                "onNull": datetime(1970, 1, 1, tzinfo=timezone.utc),
+                            "$match": {
+                                "$expr": {
+                                    "$eq": ["$id", "$$prediction_match_id"]
+                                }
                             }
                         },
-                        period_start,
-                    ]
+                        {
+                            "$project": {
+                                "_id": 0,
+                                "result_updated_at": 1,
+                            }
+                        },
+                    ],
+                    "as": "matched_match",
                 }
-            }
-        })
+            },
+            {
+                "$unwind": {
+                    "path": "$matched_match",
+                    "preserveNullAndEmptyArrays": False,
+                }
+            },
+            {
+                "$match": {
+                    "$expr": {
+                        "$gte": [
+                            {
+                                "$convert": {
+                                    "input": "$matched_match.result_updated_at",
+                                    "to": "date",
+                                    "onError": datetime(
+                                        1970, 1, 1, tzinfo=timezone.utc
+                                    ),
+                                    "onNull": datetime(
+                                        1970, 1, 1, tzinfo=timezone.utc
+                                    ),
+                                }
+                            },
+                            period_start,
+                        ]
+                    }
+                }
+            },
+        ])
 
     lookup_pipeline.append({
         "$group": {
