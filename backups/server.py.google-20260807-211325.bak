@@ -1,162 +1,6 @@
 from dotenv import load_dotenv
 from pathlib import Path
 
-
-# === TIMEZONE FIX HELPERS (unified) ===
-import re
-from datetime import timedelta
-from fastapi import Request, Query
-try:
-    from zoneinfo import ZoneInfo  # py>=3.9
-except Exception:
-    ZoneInfo = None  # fallback
-
-_ISO_NO_TZ = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$")
-
-def _dt_to_iso_z(dt):
-    from datetime import timezone
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-def _parse_dt_utc(value=None, ts=None):
-    """
-    يحول أي تمثيل وقت شائع إلى datetime واعٍ بــ UTC.
-    - يدعم: ISO مع Z/offset، ISO بدون offset (نعتبره UTC)، timestamp ثواني.
-    """
-    from datetime import datetime, timezone
-
-    if ts is not None:
-        try:
-            return datetime.fromtimestamp(int(ts), tz=timezone.utc)
-        except Exception:
-            pass
-
-    if value is None:
-        return None
-
-    if isinstance(value, (int, float)):
-        try:
-            return datetime.fromtimestamp(int(value), tz=timezone.utc)
-        except Exception:
-            return None
-
-    s = str(value).strip()
-    if not s:
-        return None
-
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-
-    if _ISO_NO_TZ.match(s):
-        s = s + "+00:00"
-
-    if len(s) == 10 and s[4] == "-" and s[7] == "-":
-        s = s + "T00:00:00+00:00"
-
-    try:
-        dt = datetime.fromisoformat(s)
-    except Exception:
-        return None
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-
-    return dt.astimezone(timezone.utc)
-
-def _get_client_tzinfo(tz=None, tz_offset=None):
-    """
-    tz_offset: دقائق getTimezoneOffset من JS.
-    مثال الرياض: -180 => UTC+3.
-    """
-    from datetime import timezone, timedelta as _td
-
-    if tz:
-        if ZoneInfo:
-            try:
-                return ZoneInfo(tz)
-            except Exception:
-                pass
-
-    if tz_offset is not None:
-        try:
-            off = int(tz_offset)
-            return timezone(_td(minutes=-off))
-        except Exception:
-            pass
-
-    return timezone.utc
-
-def _normalize_match_time_fields(doc: dict) -> dict:
-    """يوحد kickoff/kickoff_utc/timestamp داخل الوثيقة (UTC) بدون تغيير match_date المخزن."""
-    dt_utc = _parse_dt_utc(doc.get("kickoff") or doc.get("kickoff_utc"), doc.get("timestamp"))
-    if not dt_utc:
-        return doc
-    kickoff_utc = _dt_to_iso_z(dt_utc)
-    doc["kickoff"] = kickoff_utc
-    doc["kickoff_utc"] = kickoff_utc
-    doc["timestamp"] = int(dt_utc.timestamp())
-    doc["match_date_utc"] = dt_utc.date().isoformat()
-    return doc
-
-def _decorate_match_time_fields(m: dict, tzinfo, apply_local: bool) -> dict:
-    """
-    - يضمن وجود kickoff_utc + timestamp بصيغة صحيحة
-    - عند apply_local=True: يضبط kickoff/match_date لعرض المستخدم، ويُبقي النسخ UTC أيضًا.
-    """
-    from datetime import timezone
-
-    m = dict(m)
-    dt_utc = _parse_dt_utc(m.get("kickoff") or m.get("kickoff_utc"), m.get("timestamp"))
-    if not dt_utc:
-        return m
-
-    kickoff_utc = _dt_to_iso_z(dt_utc)
-    m["kickoff_utc"] = kickoff_utc
-    m["timestamp"] = int(dt_utc.timestamp())
-    m["match_date_utc"] = dt_utc.date().isoformat()
-
-    local_dt = dt_utc.astimezone(tzinfo)
-    m["kickoff_local"] = local_dt.isoformat()
-    m["match_date_local"] = local_dt.date().isoformat()
-
-    if apply_local:
-        m["kickoff"] = m["kickoff_local"]
-        m["match_date"] = m["match_date_local"]
-    else:
-        # حافظ على kickoff كـ UTC مع Z لمنع parsing خاطئ
-        m["kickoff"] = kickoff_utc
-
-    return m
-
-
-def _request_timezone_context(request, tz=None, tz_offset=None):
-    """
-    يقرأ منطقة المستخدم من:
-    1) Query: ?tz=Asia/Riyadh&tz_offset=-180
-    2) Headers: X-Timezone / X-Timezone-Offset
-    """
-    try:
-        hdr_tz = request.headers.get("X-Timezone") if request else None
-        hdr_offset = request.headers.get("X-Timezone-Offset") if request else None
-    except Exception:
-        hdr_tz = None
-        hdr_offset = None
-
-    if tz is None and hdr_tz:
-        tz = hdr_tz
-
-    if tz_offset is None and hdr_offset:
-        try:
-            tz_offset = int(hdr_offset)
-        except Exception:
-            pass
-
-    tzinfo = _get_client_tzinfo(tz, tz_offset)
-    apply_local = (tz is not None) or (tz_offset is not None)
-
-    return tzinfo, apply_local, tz, tz_offset
-
-# === END TIMEZONE FIX HELPERS ===
-
 ROOT_DIR = Path(__file__).parent
 
 load_dotenv(ROOT_DIR / '.env')
@@ -166,12 +10,6 @@ import os
 
 
 API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY")
-
-HIGHLIGHTLY_KEY = os.environ.get("HIGHLIGHTLY_KEY")
-HIGHLIGHTLY_BASE_URL = os.environ.get(
-    "HIGHLIGHTLY_BASE_URL",
-    "https://highlightly.net"
-)
 API_FOOTBALL_BASE_URL = os.environ.get(
     "API_FOOTBALL_BASE_URL",
     "https://v3.football.api-sports.io",
@@ -567,16 +405,7 @@ TEAM_AR_NAMES = {
     "Málaga CF": "مالقة",
     "Real Betis Balompié": "ريال بيتيس",
     "Real Sociedad de Fútbol": "ريال سوسيداد",
-    "Athletic Club": "أتلتيك بلباو",    "Al-Hilal Saudi": "الهلال",
-    "Al Taawoun FC": "التعاون",
-    "Al Suqoor": "الصقور",
-    "Al Diriyah": "الدرعية",
-    "Al-Ahli Saudi": "الأهلي",
-    "Al-Qadisiyah": "القادسية",
-    "Abha": "أبها",
-    "Al-Hazem": "الحزم",
-    "Al-Faisaly": "الفيصلي",
-}
+    "Athletic Club": "أتلتيك بلباو",}
 
 LEAGUE_AR_NAMES = {
     "Premier League": "الدوري الإنجليزي الممتاز",
@@ -594,537 +423,36 @@ LEAGUE_AR_NAMES = {
 
 
 
-
-# ===== Saudi Highlightly Arabic aliases =====
-TEAM_AR_NAMES.update({
-    "Abha": "أبها",
-    "Al Diriyah": "الدرعية",
-    "Al-Diriyah": "الدرعية",
-    "Al Suqoor": "الصقور",
-    "Al-Suqoor": "الصقور",
-    "Al Taawoun FC": "التعاون",
-    "Al Taawoun": "التعاون",
-    "Al-Ahli Saudi": "الأهلي",
-    "Al Ahli Saudi": "الأهلي",
-    "Al-Faisaly": "الفيصلي",
-    "Al Faisaly": "الفيصلي",
-    "Al-Hazem": "الحزم",
-    "Al Hazem": "الحزم",
-    "Al-Hilal Saudi": "الهلال",
-    "Al Hilal Saudi": "الهلال",
-    "Al-Qadisiyah": "القادسية",
-    "Al Qadisiyah": "القادسية",
-})
-
-
-# =========================================================
-# الأسماء العربية الرسمية للأندية والمنتخبات
-# =========================================================
-
-OFFICIAL_TEAM_AR = {
-    # 🇸🇦 Saudi Pro League
-    "Al-Hilal Saudi": "الهلال",
-    "Al Hilal Saudi": "الهلال",
-    "Al-Hilal": "الهلال",
-    "Al Hilal": "الهلال",
-
-    "Al-Nassr": "النصر",
-    "Al Nassr": "النصر",
-    "Al-Nassr FC": "النصر",
-
-    "Al-Ahli Saudi": "الأهلي",
-    "Al Ahli Saudi": "الأهلي",
-    "Al-Ahli": "الأهلي",
-    "Al Ahli": "الأهلي",
-
-    "Al-Ittihad": "الاتحاد",
-    "Al Ittihad": "الاتحاد",
-    "Al-Ittihad Jeddah": "الاتحاد",
-
-    "Al-Ettifaq": "الاتفاق",
-    "Al Ettifaq": "الاتفاق",
-
-    "Al-Fateh": "الفتح",
-    "Al Fateh": "الفتح",
-
-    "Al-Fayha": "الفيحاء",
-    "Al Fayha": "الفيحاء",
-
-    "Al-Taawoun": "التعاون",
-    "Al Taawoun": "التعاون",
-
-    "Al-Riyadh": "الرياض",
-    "Al Riyadh": "الرياض",
-
-    "Al-Qadsiah": "القادسية",
-    "Al Qadsiah": "القادسية",
-
-    "Al-Khaleej": "الخليج",
-    "Al Khaleej": "الخليج",
-
-    "Al-Wehda": "الوحدة",
-    "Al Wehda": "الوحدة",
-
-    "Al-Raed": "الرائد",
-    "Al Raed": "الرائد",
-
-    "Al-Okhdood": "الأخدود",
-    "Al Okhdood": "الأخدود",
-
-    "Al-Kholood": "الخلود",
-    "Al Kholood": "الخلود",
-
-    "Damac": "ضمك",
-    "Abha": "أبها",
-    "Al-Hazem": "الحزم",
-    "Al Hazem": "الحزم",
-
-    # 🇪🇸 La Liga
-    "Real Madrid": "ريال مدريد",
-    "Barcelona": "برشلونة",
-    "Atletico Madrid": "أتلتيكو مدريد",
-    "Atlético Madrid": "أتلتيكو مدريد",
-    "Athletic Club": "أتلتيك بلباو",
-    "Athletic Bilbao": "أتلتيك بلباو",
-    "Real Sociedad": "ريال سوسيداد",
-    "Real Betis": "ريال بيتيس",
-    "Villarreal": "فياريال",
-    "Valencia": "فالنسيا",
-    "Sevilla": "إشبيلية",
-    "Getafe": "خيتافي",
-    "Girona": "جيرونا",
-    "Celta Vigo": "سيلتا فيغو",
-    "Osasuna": "أوساسونا",
-    "Mallorca": "ريال مايوركا",
-    "Rayo Vallecano": "رايو فاييكانو",
-    "Espanyol": "إسبانيول",
-    "Alaves": "ألافيس",
-    "Alavés": "ألافيس",
-
-    # 🏴 Premier League
-    "Manchester City": "مانشستر سيتي",
-    "Manchester United": "مانشستر يونايتد",
-    "Liverpool": "ليفربول",
-    "Arsenal": "أرسنال",
-    "Chelsea": "تشيلسي",
-    "Tottenham": "توتنهام",
-    "Tottenham Hotspur": "توتنهام",
-    "Newcastle United": "نيوكاسل يونايتد",
-    "Aston Villa": "أستون فيلا",
-    "West Ham United": "وست هام يونايتد",
-    "West Ham": "وست هام يونايتد",
-    "Everton": "إيفرتون",
-    "Crystal Palace": "كريستال بالاس",
-    "Fulham": "فولهام",
-    "Brentford": "برينتفورد",
-    "Brighton": "برايتون",
-    "Brighton & Hove Albion": "برايتون",
-    "Wolverhampton Wanderers": "وولفرهامبتون",
-    "Wolves": "وولفرهامبتون",
-    "Nottingham Forest": "نوتنغهام فورست",
-    "Leicester City": "ليستر سيتي",
-    "Southampton": "ساوثهامبتون",
-    "Burnley": "بيرنلي",
-    "Leeds United": "ليدز يونايتد",
-    "Ipswich Town": "إيبسويتش تاون",
-
-    # 🇮🇹 Serie A
-    "Inter": "إنتر ميلان",
-    "Inter Milan": "إنتر ميلان",
-    "Internazionale": "إنتر ميلان",
-    "AC Milan": "ميلان",
-    "Milan": "ميلان",
-    "Juventus": "يوفنتوس",
-    "Napoli": "نابولي",
-    "Roma": "روما",
-    "Lazio": "لاتسيو",
-    "Atalanta": "أتالانتا",
-    "Fiorentina": "فيورنتينا",
-    "Bologna": "بولونيا",
-    "Torino": "تورينو",
-    "Genoa": "جنوى",
-    "Udinese": "أودينيزي",
-    "Monza": "مونزا",
-    "Parma": "بارما",
-    "Cagliari": "كالياري",
-    "Como": "كومو",
-    "Lecce": "ليتشي",
-    "Empoli": "إمبولي",
-
-    # 🇩🇪 Bundesliga
-    "Bayern Munich": "بايرن ميونخ",
-    "Bayern München": "بايرن ميونخ",
-    "Borussia Dortmund": "بوروسيا دورتموند",
-    "Bayer Leverkusen": "باير ليفركوزن",
-    "RB Leipzig": "لايبزيغ",
-    "Eintracht Frankfurt": "آينتراخت فرانكفورت",
-    "VfB Stuttgart": "شتوتغارت",
-    "Wolfsburg": "فولفسبورغ",
-    "SC Freiburg": "فرايبورغ",
-    "Borussia Monchengladbach": "بوروسيا مونشنغلادباخ",
-    "Borussia Mönchengladbach": "بوروسيا مونشنغلادباخ",
-    "Mainz": "ماينز",
-    "Werder Bremen": "فيردر بريمن",
-    "Union Berlin": "يونيون برلين",
-    "Hoffenheim": "هوفنهايم",
-    "Augsburg": "أوغسبورغ",
-
-    # 🇫🇷 Ligue 1
-    "Paris Saint-Germain": "باريس سان جيرمان",
-    "Paris Saint Germain": "باريس سان جيرمان",
-    "PSG": "باريس سان جيرمان",
-    "Marseille": "مارسيليا",
-    "Monaco": "موناكو",
-    "Lyon": "ليون",
-    "Lille": "ليل",
-    "Nice": "نيس",
-    "Lens": "لانس",
-    "Rennes": "رين",
-    "Nantes": "نانت",
-    "Montpellier": "مونبلييه",
-    "Strasbourg": "ستراسبورغ",
-    "Toulouse": "تولوز",
-    "Brest": "بريست",
-    "Reims": "ريمس",
-    "Saint Etienne": "سانت إتيان",
-
-    # 🇳🇱 Eredivisie
-    "Ajax": "أياكس",
-    "PSV Eindhoven": "آيندهوفن",
-    "PSV": "آيندهوفن",
-    "Feyenoord": "فينورد",
-    "AZ Alkmaar": "ألكمار",
-    "Twente": "تفنتي",
-
-    # 🇵🇹 Portugal
-    "Benfica": "بنفيكا",
-    "Porto": "بورتو",
-    "Sporting CP": "سبورتينغ لشبونة",
-    "Sporting Lisbon": "سبورتينغ لشبونة",
-    "Braga": "سبورتينغ براغا",
-
-    # 🇹🇷 Turkey
-    "Galatasaray": "غلطة سراي",
-    "Fenerbahce": "فنربخشة",
-    "Fenerbahçe": "فنربخشة",
-    "Besiktas": "بشكتاش",
-    "Beşiktaş": "بشكتاش",
-    "Trabzonspor": "طرابزون سبور",
-
-    # 🇧🇪 Belgium
-    "Club Brugge": "كلوب بروج",
-    "Anderlecht": "أندرلخت",
-    "Genk": "جينك",
-    "Union Saint-Gilloise": "سانت جيلواز",
-
-    # 🇧🇷 Brazil
-    "Flamengo": "فلامنغو",
-    "Palmeiras": "بالميراس",
-    "Santos": "سانتوس",
-    "Corinthians": "كورينثيانز",
-    "Sao Paulo": "ساو باولو",
-    "São Paulo": "ساو باولو",
-    "Fluminense": "فلومينينسي",
-    "Botafogo": "بوتافوغو",
-    "Gremio": "غريميو",
-    "Grêmio": "غريميو",
-    "Internacional": "إنترناسيونال",
-
-    # 🇦🇷 Argentina
-    "River Plate": "ريفير بليت",
-    "Boca Juniors": "بوكا جونيورز",
-    "Racing Club": "راسينغ كلوب",
-    "Independiente": "إنديبندينتي",
-
-    # 🌍 National Teams
-    "Brazil": "البرازيل",
-    "Argentina": "الأرجنتين",
-    "France": "فرنسا",
-    "Spain": "إسبانيا",
-    "Germany": "ألمانيا",
-    "England": "إنجلترا",
-    "Portugal": "البرتغال",
-    "Italy": "إيطاليا",
-    "Netherlands": "هولندا",
-    "Belgium": "بلجيكا",
-    "Croatia": "كرواتيا",
-    "Morocco": "المغرب",
-    "Japan": "اليابان",
-    "South Korea": "كوريا الجنوبية",
-    "Mexico": "المكسيك",
-    "United States": "الولايات المتحدة",
-    "USA": "الولايات المتحدة",
-    "Canada": "كندا",
-    "Colombia": "كولومبيا",
-    "Uruguay": "الأوروغواي",
-    "Paraguay": "باراغواي",
-    "Saudi Arabia": "السعودية",
-    "Australia": "أستراليا",
-    "Qatar": "قطر",
-    "Egypt": "مصر",
-    "Algeria": "الجزائر",
-    "Tunisia": "تونس",
-
-    "Al Shabab": "الشباب",
-    "Al-Shabab": "الشباب",
-    "Al Shabab FC": "الشباب",
-    "Al Diriyah": "الدرعية",
-    "Al-Diriyah": "الدرعية",
-    "Al Diriyah FC": "الدرعية",
-    "Al-Qadisiyah": "القادسية",
-    "Al Qadisiyah": "القادسية",
-    "Al-Qadisiyah FC": "القادسية",
-    "Al-Ittihad FC": "الاتحاد",
-    "Al Ittihad FC": "الاتحاد",
-    "Al-Fateh SC": "الفتح",
-    "Al Fateh SC": "الفتح",
-    "Al-Faisaly": "الفيصلي",
-    "Al Faisaly": "الفيصلي",
-    "Al-Faisaly FC": "الفيصلي",
-    "Al Kholood Club": "الخلود",
-    "Club Atlético de Madrid": "أتلتيكو مدريد",
-    "Atletico de Madrid": "أتلتيكو مدريد",
-    "Real Madrid CF": "ريال مدريد",
-    "FC Barcelona": "برشلونة",
-    "Villarreal CF": "فياريال",
-    "Valencia CF": "فالنسيا",
-    "Elche CF": "إلتشي",
-    "Elche": "إلتشي",
-    "RCD Espanyol de Barcelona": "إسبانيول",
-    "RCD Espanyol": "إسبانيول",
-    "Real Betis Balompié": "ريال بيتيس",
-    "Real Sociedad de Fútbol": "ريال سوسيداد",
-    "Málaga CF": "مالقا",
-    "Malaga CF": "مالقا",
-    "Málaga": "مالقا",
-    "Malaga": "مالقا",
-    "Udinese Calcio": "أودينيزي",
-    "Como 1907": "كومو",
-    "AS Roma": "روما",
-    "FC Bayern Munich": "بايرن ميونخ",
-    "Olympique Marseille": "مارسيليا",
-    "Olympique Lyonnais": "ليون",
-    "AS Monaco": "موناكو",
-    "Lille OSC": "ليل",
-    "OGC Nice": "نيس",
-    "SL Benfica": "بنفيكا",
-    "FC Porto": "بورتو",
-}
-
-def _legacy_team_ar_name(en_name: str) -> str:
-    # الاسم العربي الرسمي أولاً، ثم الترجمة الحالية كـ fallback.
-    if en_name:
-        official = OFFICIAL_TEAM_AR.get(str(en_name).strip())
-        if official:
-            return official
-
-    # الاسم الرسمي أولاً — يمنع الترجمة/النطق الآلي الخاطئ
-    if en_name:
-        raw_name = str(en_name).strip()
-        if raw_name in OFFICIAL_TEAM_AR:
-            return OFFICIAL_TEAM_AR[raw_name]
-
-        folded = raw_name.casefold()
-        for official_name, arabic_name in OFFICIAL_TEAM_AR.items():
-            if official_name.casefold() == folded:
-                return arabic_name
-
-    """
-    تعريب أسماء الفرق:
-    - ترجمة كلمات شائعة (United/City/Club...)
-    - تعريب حرفي (Transliteration) لأي اسم غير موجود بالقاموس
-    """
-    import re
-
-    if not en_name:
-        return ""
-
-    name = str(en_name).strip()
+def team_ar_name(name):
     if not name:
-        return ""
+        return name
 
-    # تنظيف لاحقات شائعة
-    name = re.sub(r"\b(FC|AFC|CF|SC|SFC|SSC|AC|AS|CD|UD)\b\.?", "", name, flags=re.I)
-    name = re.sub(r"\s+", " ", name).strip()
+    name = str(name).strip()
 
-    # قاموس سريع لأشهر الكلمات (يشتغل مع أي دوري)
-    word_map = {
-        "United": "يونايتد",
-        "City": "سيتي",
-        "Town": "تاون",
-        "County": "كاونتي",
-        "Rangers": "رينجرز",
-        "Wanderers": "واندررز",
-        "Athletic": "أتلتيك",
-        "Sporting": "سبورتينغ",
-        "Real": "ريال",
-        "Club": "",
-        "Deportivo": "ديبورتيفو",
-        "Borussia": "بوروسيا",
-        "Bayern": "بايرن",
-        "Saint": "سانت",
-        "St": "سانت",
-        "Inter": "إنتر",
-        "Union": "يونيون",
-        "Olympique": "أولمبيك",
-    }
-
-    full_map = {
-        # أمثلة (أضف ما تريد هنا مستقبلاً)
-        "Real Madrid": "ريال مدريد",
-        "Barcelona": "برشلونة",
-        "Manchester United": "مانشستر يونايتد",
-        "Manchester City": "مانشستر سيتي",
-        "Arsenal": "أرسنال",
-        "Liverpool": "ليفربول",
-        "Chelsea": "تشيلسي",
-        "Tottenham Hotspur": "توتنهام",
-        "Coventry City": "كوفنتري سيتي",
-        "Hull City": "هال سيتي",
-        "Sunderland": "سندرلاند",
-        "Ipswich Town": "إيبسويتش تاون",
-    }
-
-    # لو الاسم مطابق لقاموس كامل
-    if name in full_map:
-        return full_map[name]
-
-    def translit_word(w: str) -> str:
-        w0 = re.sub(r"[^A-Za-z0-9]", "", w)
-        if not w0:
-            return ""
-        wlow = w0.lower()
-
-        # digraphs
-        wlow = (wlow
-            .replace("sch", "sh")
-            .replace("sh", "ش")
-            .replace("ch", "تش")
-            .replace("th", "ث")
-            .replace("ph", "ف")
-            .replace("gh", "غ")
-            .replace("kh", "خ")
-            .replace("ou", "و")
-            .replace("oo", "و")
-            .replace("ee", "ي")
-            .replace("ai", "اي")
-            .replace("ay", "اي")
-        )
-
-        # mapping single letters
-        m = {
-            "a":"ا","b":"ب","c":"ك","d":"د","e":"ي","f":"ف","g":"ج","h":"ه",
-            "i":"ي","j":"ج","k":"ك","l":"ل","m":"م","n":"ن","o":"و","p":"ب",
-            "q":"ق","r":"ر","s":"س","t":"ت","u":"و","v":"ف","w":"و","x":"كس",
-            "y":"ي","z":"ز",
-            "0":"0","1":"1","2":"2","3":"3","4":"4","5":"5","6":"6","7":"7","8":"8","9":"9",
-        }
-
-        # تحسين بسيط: تجاهل e داخل الكلمة إذا حولها حروف ساكنة (يساعد Coventry -> كوفنتري)
-        out = []
-        for i, ch in enumerate(wlow):
-            if ch == "e" and 0 < i < len(wlow)-1:
-                prevc = wlow[i-1]
-                nextc = wlow[i+1]
-                vowels = set("aeiouy")
-                if prevc not in vowels and nextc not in vowels:
-                    continue
-            out.append(m.get(ch, ch))
-        return "".join(out)
-
-    parts = name.split()
-    ar_parts = []
-    for w in parts:
-        # لو كلمة معروفة
-        if w in word_map:
-            if word_map[w]:
-                ar_parts.append(word_map[w])
-            continue
-
-        # لو تركيب جزئي موجود في full_map (مثل "Coventry City")
-        # نجرب بدون لاحقات
-        ar_parts.append(translit_word(w))
-
-    ar = " ".join([x for x in ar_parts if x]).strip()
-    return ar or name
-
-
-
-def team_ar_name(en_name: str) -> str:
-    """
-    الاسم العربي الرسمي للنادي.
-
-    الأولوية:
-    1. OFFICIAL_TEAM_AR
-    2. الاسم العربي الموجود مسبقًا إن كان مناسبًا
-    3. الترجمة/الترانسلِت الحالية كـ fallback
-
-    مهم:
-    لا نغير الاسم الإنجليزي الأصلي.
-    """
-
-    if en_name is None:
-        return ""
-
-    name = str(en_name).strip()
-
-    if not name:
-        return ""
-
-    # --------------------------------------------------------
-    # الاسم الرسمي — exact match
-    # --------------------------------------------------------
-    try:
-        official = OFFICIAL_TEAM_AR.get(name)
-
-        if official:
-            return str(official).strip()
-    except Exception:
-        pass
-
-    # --------------------------------------------------------
-    # الاسم الرسمي — case-insensitive
-    # --------------------------------------------------------
-    try:
-        name_cf = name.casefold()
-
-        for key, value in OFFICIAL_TEAM_AR.items():
-            if str(key).strip().casefold() == name_cf:
-                if value:
-                    return str(value).strip()
-    except Exception:
-        pass
-
-    # --------------------------------------------------------
-    # تنظيف بسيط للأسماء التي تأتي من مزودي البيانات
-    # مثل CF / FC / SC / AFC
-    # --------------------------------------------------------
-    normalized = re.sub(
-        r"\s+(CF|FC|SC|AFC|AC)$",
-        "",
+    aliases = [
         name,
-        flags=re.IGNORECASE,
-    ).strip()
+        name.replace(" FC", ""),
+        name.replace(" CF", ""),
+        name.replace(" AFC", ""),
+        name.replace(" AC", ""),
+        name.replace(" SC", ""),
+        name.replace(" UD", ""),
+        name.replace(" CD", ""),
+        name.replace(" Club", ""),
+        name.replace(" Football Club", ""),
+        name.replace(" Club Atlético de ", ""),
+        name.replace(" Real ", ""),
+        name.replace(" RC ", ""),
+        name.replace(" RCD ", ""),
+        name.replace(" CA ", ""),
+    ]
 
-    if normalized and normalized != name:
-        try:
-            official = OFFICIAL_TEAM_AR.get(normalized)
-            if official:
-                return str(official).strip()
+    for alias in aliases:
+        alias = alias.strip()
+        if alias in TEAM_AR_NAMES:
+            return TEAM_AR_NAMES[alias]
 
-            normalized_cf = normalized.casefold()
-
-            for key, value in OFFICIAL_TEAM_AR.items():
-                if str(key).strip().casefold() == normalized_cf:
-                    if value:
-                        return str(value).strip()
-        except Exception:
-            pass
-
-    # --------------------------------------------------------
-    # fallback إلى النظام القديم
-    # --------------------------------------------------------
-    return _legacy_team_ar_name(name)
+    return TEAM_AR_NAMES.get(name, name)
 
 
 def league_ar_name(name: str | None):
@@ -1579,16 +907,6 @@ class MatchCreate(BaseModel):
     group_name: Optional[str] = None
     external_provider: Optional[str] = None
     external_fixture_id: Optional[str] = None  # accepts "fd:564628" or "564628"
-
-    # بيانات البطولة — تستخدم لربط المباراة بتبويب الدوري
-    league_id: Optional[int] = None
-    league_name_en: Optional[str] = None
-    league_name_ar: Optional[str] = None
-    league_logo: Optional[str] = None
-    season: Optional[int] = None
-    round_en: Optional[str] = None
-    round_ar: Optional[str] = None
-
     # optional team meta (used to auto-create teams if code like fd:xxx not in /teams)
     home_team_name_ar: Optional[str] = None
     home_team_name_en: Optional[str] = None
@@ -1596,15 +914,6 @@ class MatchCreate(BaseModel):
     away_team_name_ar: Optional[str] = None
     away_team_name_en: Optional[str] = None
     away_team_logo: Optional[str] = None
-
-    # بيانات البطولة الاختيارية
-    league_id: Optional[int] = None
-    league_name_en: Optional[str] = None
-    league_name_ar: Optional[str] = None
-    league_logo: Optional[str] = None
-    season: Optional[int] = None
-    round_en: Optional[str] = None
-    round_ar: Optional[str] = None
 
 
 class MatchUpdate(BaseModel):
@@ -1617,16 +926,6 @@ class MatchUpdate(BaseModel):
     group_name: Optional[str] = None
     external_provider: Optional[str] = None
     external_fixture_id: Optional[str] = None  # accepts "fd:564628" or "564628"
-
-    # بيانات البطولة — تستخدم لربط المباراة بتبويب الدوري
-    league_id: Optional[int] = None
-    league_name_en: Optional[str] = None
-    league_name_ar: Optional[str] = None
-    league_logo: Optional[str] = None
-    season: Optional[int] = None
-    round_en: Optional[str] = None
-    round_ar: Optional[str] = None
-
     # optional team meta (used to auto-create teams if code like fd:xxx not in /teams)
     home_team_name_ar: Optional[str] = None
     home_team_name_en: Optional[str] = None
@@ -1646,25 +945,8 @@ class MatchModel(BaseModel):
     id: str
     home_team: str
     away_team: str
-
-    # أسماء الفرق محفوظة مع المباراة لضمان ثبات الاسم العربي
-    # وعدم الاعتماد على ترجمة/ترانسلِت لاحقة.
-    home_team_name_ar: Optional[str] = None
-    home_team_name_en: Optional[str] = None
-    home_team_logo: Optional[str] = None
-    away_team_name_ar: Optional[str] = None
-    away_team_name_en: Optional[str] = None
-    away_team_logo: Optional[str] = None
-
     match_date: str
     kickoff: str
-    # --- timezone/display helpers (optional; backward compatible) ---
-    kickoff_utc: Optional[str] = None
-    kickoff_local: Optional[str] = None
-    match_date_utc: Optional[str] = None
-    match_date_local: Optional[str] = None
-    timestamp: Optional[int] = None
-
     competition: str = "worldcup"
     stage: str
     group_name: Optional[str] = None
@@ -1854,38 +1136,11 @@ async def register(data: RegisterIn):
 
 @api_router.post("/auth/login", response_model=AuthOut)
 async def login(data: LoginIn):
-    import time
-    _login_start = time.perf_counter()
-
     email = data.email.lower().strip()
-
-    _t = time.perf_counter()
     user = await db.users.find_one({"email": email})
-    _db_ms = (time.perf_counter() - _t) * 1000
-
-    _t = time.perf_counter()
-    valid = bool(user and verify_password(data.password, user["password_hash"]))
-    _bcrypt_ms = (time.perf_counter() - _t) * 1000
-
-    if not valid:
-        print(
-            f"LOGIN TIMING db={_db_ms:.1f}ms "
-            f"bcrypt={_bcrypt_ms:.1f}ms "
-            f"total={(time.perf_counter()-_login_start)*1000:.1f}ms"
-        )
+    if not user or not verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="البريد أو كلمة المرور غير صحيحة")
-
-    _t = time.perf_counter()
     token = create_token(user["id"])
-    _jwt_ms = (time.perf_counter() - _t) * 1000
-
-    print(
-        f"LOGIN TIMING db={_db_ms:.1f}ms "
-        f"bcrypt={_bcrypt_ms:.1f}ms "
-        f"jwt={_jwt_ms:.1f}ms "
-        f"total={(time.perf_counter()-_login_start)*1000:.1f}ms"
-    )
-
     return {"user": user_to_public(user), "token": token}
 
 
@@ -1929,18 +1184,9 @@ def _verify_google_id_token_via_firebase_rest(id_token: str) -> dict:
 
 @api_router.post("/auth/google", response_model=AuthOut)
 async def google_login(data: GoogleAuthIn):
-    """
-    Google/Firebase login.
-
-    Uses firebase-admin when available.
-    If firebase-admin is not installed (e.g. Termux), uses the
-    Firebase REST accounts:lookup endpoint instead.
-    """
+    # Prefer firebase-admin if available, otherwise REST fallback (works on Termux & Render).
     decoded = None
 
-    # ---------------------------------------------------------
-    # 1) Try Firebase Admin SDK if it is installed/configured
-    # ---------------------------------------------------------
     if firebase_admin is not None and firebase_auth is not None:
         try:
             if not firebase_admin._apps:
@@ -1956,40 +1202,55 @@ async def google_login(data: GoogleAuthIn):
                         firebase_admin.initialize_app(cred)
 
             if firebase_admin._apps:
-                decoded = firebase_auth.verify_id_token(
-                    data.id_token,
-                    check_revoked=False,
-                )
-        except Exception as exc:
-            logger.warning(
-                "Firebase Admin verification unavailable, using REST fallback: %r",
-                exc,
-            )
+                decoded = firebase_auth.verify_id_token(data.id_token, check_revoked=False)
+        except Exception:
             decoded = None
 
-    # ---------------------------------------------------------
-    # 2) REST fallback
-    # ---------------------------------------------------------
     if decoded is None:
-        try:
-            decoded = _verify_google_id_token_via_firebase_rest(data.id_token)
-        except Exception as exc:
-            import traceback
+        decoded = _verify_google_id_token_via_firebase_rest(data.id_token)
 
-            logger.error("GOOGLE REST VERIFY ERROR: %r", exc)
-            logger.error(traceback.format_exc())
+    try:
+        if not firebase_admin._apps:
+            service_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
 
-            raise HTTPException(
-                status_code=401,
-                detail="تعذر التحقق من حساب Google",
-            )
+            if service_json:
+                cred = credentials.Certificate(json.loads(service_json))
+                firebase_admin.initialize_app(cred)
+            else:
+                key_path = ROOT_DIR / "serviceAccountKey.json"
+
+                if not key_path.exists():
+                    raise HTTPException(
+                        status_code=500,
+                        detail="serviceAccountKey.json not found",
+                    )
+
+                cred = credentials.Certificate(str(key_path))
+                firebase_admin.initialize_app(cred)
+
+        decoded = firebase_auth.verify_id_token(
+            data.id_token,
+            check_revoked=False,
+        )
+    except Exception as exc:
+        import traceback
+
+        logger.error(
+            "GOOGLE VERIFY ERROR: %r",
+            exc,
+        )
+
+        logger.error(traceback.format_exc())
+
+        raise HTTPException(
+            status_code=401,
+            detail=str(exc),
+        )
 
     email = str(decoded.get("email") or "").lower().strip()
     name = str(decoded.get("name") or "").strip()
     picture = str(decoded.get("picture") or "").strip()
-    firebase_uid = str(
-        decoded.get("uid") or decoded.get("sub") or ""
-    ).strip()
+    firebase_uid = str(decoded.get("uid") or decoded.get("sub") or "").strip()
     email_verified = bool(decoded.get("email_verified"))
 
     if not email or not firebase_uid:
@@ -2004,9 +1265,6 @@ async def google_login(data: GoogleAuthIn):
             detail="البريد الإلكتروني في حساب Google غير موثّق",
         )
 
-    # ---------------------------------------------------------
-    # 3) Find existing user by email
-    # ---------------------------------------------------------
     user = await db.users.find_one({"email": email})
 
     if user:
@@ -2018,9 +1276,6 @@ async def google_login(data: GoogleAuthIn):
         if picture and not user.get("avatar"):
             updates["avatar"] = picture
 
-        if name and not user.get("name"):
-            updates["name"] = name
-
         await db.users.update_one(
             {"id": user["id"]},
             {"$set": updates},
@@ -2031,9 +1286,6 @@ async def google_login(data: GoogleAuthIn):
             **updates,
         }
 
-    # ---------------------------------------------------------
-    # 4) Create new user
-    # ---------------------------------------------------------
     else:
         user_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
@@ -2052,9 +1304,6 @@ async def google_login(data: GoogleAuthIn):
 
         await db.users.insert_one(user)
 
-    # ---------------------------------------------------------
-    # 5) Issue normal King Predictions JWT
-    # ---------------------------------------------------------
     token = create_token(user["id"])
 
     return {
@@ -2151,29 +1400,6 @@ async def get_teams():
     for team in extra_teams:
         add_team(team)
 
-    # ── ملء الشعارات والأسماء المفقودة بالتطابق بالاسم ──
-    _logo_map = {}
-    _id_map = {}
-    for _t in merged:
-        for _k in [_t.get("name_en"), _t.get("name_ar")]:
-            if _k:
-                lk = _k.strip().lower()
-                if _t.get("logo") and lk not in _logo_map:
-                    _logo_map[lk] = _t["logo"]
-                if _t.get("api_football_team_id") and lk not in _id_map:
-                    _id_map[lk] = _t["api_football_team_id"]
-    for _t in merged:
-        if not _t.get("logo"):
-            for _k in [_t.get("name_en"), _t.get("name_ar")]:
-                if _k and _k.strip().lower() in _logo_map:
-                    _t["logo"] = _logo_map[_k.strip().lower()]
-                    break
-        if not _t.get("api_football_team_id"):
-            for _k in [_t.get("name_en"), _t.get("name_ar")]:
-                if _k and _k.strip().lower() in _id_map:
-                    _t["api_football_team_id"] = _id_map[_k.strip().lower()]
-                    break
-
     merged.sort(
         key=lambda team: (
             team.get("name_ar") or team.get("name_en") or ""
@@ -2183,43 +1409,13 @@ async def get_teams():
     return merged
 
 
-
-
 # ---------- Matches ----------
 @api_router.get("/matches", response_model=List[MatchModel])
-async def list_matches(
-    request: Request,
-    date: Optional[str] = None,
-    tz: Optional[str] = Query(None),
-    tz_offset: Optional[int] = Query(None),
-):
-    # --- timezone handling (unified) ---
-    hdr_tz = request.headers.get("X-Timezone")
-    hdr_off = request.headers.get("X-Timezone-Offset")
-    if tz is None and hdr_tz:
-        tz = hdr_tz
-    if tz_offset is None and hdr_off:
-        try:
-            tz_offset = int(hdr_off)
-        except Exception:
-            pass
-    tzinfo = _get_client_tzinfo(tz, tz_offset)
-    apply_local = (tz is not None) or (tz_offset is not None)
-
+async def list_matches(date: Optional[str] = None):
     query = {}
     if date:
-        # نجلب اليوم المطلوب + اليوم السابق + التالي (يغطي فروقات المناطق الزمنية)
-        try:
-            from datetime import datetime as _dt
-            d0 = _dt.fromisoformat(date).date()
-            candidates = [
-                (d0 - timedelta(days=1)).isoformat(),
-                d0.isoformat(),
-                (d0 + timedelta(days=1)).isoformat(),
-            ]
-            query["match_date"] = {"$in": candidates}
-        except Exception:
-            query["match_date"] = date
+        query["match_date"] = date
+
     rows = await db.matches.find(query, {"_id": 0}).sort("kickoff", 1).to_list(1000)
 
     # إخفاء مباريات كأس العالم من تبويب المباريات فقط
@@ -2266,20 +1462,6 @@ async def list_matches(
     teams = await get_teams()
     teams_map = {t["code"]: t for t in teams}
 
-    def find_team(code):
-        if not code:
-            return None
-        t = teams_map.get(code)
-        if t:
-            return t
-        # تجربة البادئة البديلة: af: ↔ fd:
-        if ":" in str(code):
-            prefix, tid = str(code).split(":", 1)
-            alt = f"af:{tid}" if prefix == "fd" else f"fd:{tid}" if prefix == "af" else None
-            if alt:
-                return teams_map.get(alt)
-        return None
-
     result = []
     manual_keys = set()
 
@@ -2295,48 +1477,14 @@ async def list_matches(
         )
 
         manual_keys.add(key)
-        home = find_team(m.get("home_team"))
-        away = find_team(m.get("away_team"))
+        home = teams_map.get(m.get("home_team"))
+        away = teams_map.get(m.get("away_team"))
 
         if home:
             m["home"] = home
 
-            # الاسم المحفوظ في المباراة له الأولوية،
-            # ثم الاسم العربي من سجل الفريق.
-            m["home_team_name_ar"] = (
-                m.get("home_team_name_ar")
-                or home.get("name_ar")
-                or home.get("name_en")
-                or m.get("home_team")
-            )
-            m["home_team_name_en"] = (
-                m.get("home_team_name_en")
-                or home.get("name_en")
-                or m.get("home_team_name_ar")
-            )
-            m["home_team_logo"] = (
-                m.get("home_team_logo")
-                or home.get("logo")
-            )
-
         if away:
             m["away"] = away
-
-            m["away_team_name_ar"] = (
-                m.get("away_team_name_ar")
-                or away.get("name_ar")
-                or away.get("name_en")
-                or m.get("away_team")
-            )
-            m["away_team_name_en"] = (
-                m.get("away_team_name_en")
-                or away.get("name_en")
-                or m.get("away_team_name_ar")
-            )
-            m["away_team_logo"] = (
-                m.get("away_team_logo")
-                or away.get("logo")
-            )
 
         result.append(m)
 
@@ -2354,281 +1502,24 @@ async def list_matches(
         if key in manual_keys:
             continue
 
-        home = find_team(m.get("home_team"))
-        away = find_team(m.get("away_team"))
+        home = teams_map.get(m.get("home_team"))
+        away = teams_map.get(m.get("away_team"))
 
         if home:
             m["home"] = home
 
-            # الاسم العربي المحفوظ في المباراة أولاً،
-            # ثم الاسم العربي من سجل الفريق.
-            m["home_team_name_ar"] = (
-                m.get("home_team_name_ar")
-                or home.get("name_ar")
-                or home.get("name_en")
-                or m.get("home_team")
-            )
-            m["home_team_name_en"] = (
-                m.get("home_team_name_en")
-                or home.get("name_en")
-                or m.get("home_team_name_ar")
-            )
-            m["home_team_logo"] = (
-                m.get("home_team_logo")
-                or home.get("logo")
-            )
-
         if away:
             m["away"] = away
 
-            m["away_team_name_ar"] = (
-                m.get("away_team_name_ar")
-                or away.get("name_ar")
-                or away.get("name_en")
-                or m.get("away_team")
-            )
-            m["away_team_name_en"] = (
-                m.get("away_team_name_en")
-                or away.get("name_en")
-                or m.get("away_team_name_ar")
-            )
-            m["away_team_logo"] = (
-                m.get("away_team_logo")
-                or away.get("logo")
-            )
-
         result.append(m)
-    # --- decorate kickoff/match_date according to user timezone ---
-    decorated = []
-    for m in result:
-        mm = _decorate_match_time_fields(m, tzinfo, apply_local=apply_local)
-        if date and apply_local and mm.get("match_date") != date:
-            continue
-        decorated.append(mm)
-    decorated.sort(key=lambda x: x.get("timestamp") or 0)
-    return decorated
-# ============================================================
-# Competition duplicate protection
-# ============================================================
 
-def _competition_team_id(code):
-    """
-    يحول أكواد الفرق مثل:
-      fd:57
-      af:57
-      57
-    إلى رقم الفريق.
-    """
-    if code is None:
-        return None
-
-    value = str(code).strip()
-
-    if ":" in value:
-        value = value.split(":", 1)[1].strip()
-
-    return int(value) if value.isdigit() else None
-
-
-def _fixture_date(fixture):
-    value = str(
-        fixture.get("kickoff_utc")
-        or fixture.get("kickoff")
-        or ""
-    ).strip()
-
-    return value[:10]
-
-
-async def find_competition_fixture_for_match(
-    home_team,
-    away_team,
-    match_date,
-    external_fixture_id=None,
-):
-    """
-    يبحث في competition_data عن المباراة المقابلة.
-
-    - لا يعتبر كأس العالم مصدرًا للإضافة اليدوية.
-    - إذا وجد external_fixture_id يطابقه مباشرة.
-    - وإلا يطابق رقمَي الفريق + التاريخ.
-    """
-
-    target_home_id = _competition_team_id(home_team)
-    target_away_id = _competition_team_id(away_team)
-
-    target_fixture_id = None
-
-    if external_fixture_id is not None:
-        raw = str(external_fixture_id).strip()
-
-        if ":" in raw:
-            raw = raw.split(":", 1)[1].strip()
-
-        if raw.isdigit():
-            target_fixture_id = int(raw)
-
-    cursor = db.competition_data.find(
-        {"kind": "matches"},
-        {
-            "_id": 0,
-            "league_id": 1,
-            "season": 1,
-            "items": 1,
-        },
-    )
-
-    async for doc in cursor:
-        league_id = doc.get("league_id")
-
-        try:
-            league_id = int(league_id)
-        except Exception:
-            league_id = 0
-
-        # كأس العالم مستثنى من هذا المنع
-        if league_id == 1:
-            continue
-
-        items = doc.get("items") or []
-
-        for fixture in items:
-            if not isinstance(fixture, dict):
-                continue
-
-            fixture_id = fixture.get("fixture_id")
-
-            try:
-                fixture_id_int = int(fixture_id)
-            except Exception:
-                fixture_id_int = None
-
-            # ------------------------------------------------
-            # 1) تطابق مباشر بواسطة رقم المباراة
-            # ------------------------------------------------
-            if (
-                target_fixture_id is not None
-                and fixture_id_int == target_fixture_id
-            ):
-                return {
-                    "fixture": fixture,
-                    "league_id": league_id,
-                    "season": doc.get("season"),
-                }
-
-            # ------------------------------------------------
-            # 2) تطابق الفريقين + التاريخ
-            # ------------------------------------------------
-            if target_home_id is None or target_away_id is None:
-                continue
-
-            if _fixture_date(fixture) != str(match_date)[:10]:
-                continue
-
-            teams = fixture.get("teams") or {}
-            home = teams.get("home") or {}
-            away = teams.get("away") or {}
-
-            try:
-                home_id = int(home.get("id"))
-                away_id = int(away.get("id"))
-            except Exception:
-                continue
-
-            if (
-                home_id == target_home_id
-                and away_id == target_away_id
-            ):
-                return {
-                    "fixture": fixture,
-                    "league_id": league_id,
-                    "season": doc.get("season"),
-                }
-
-    return None
-
-
-async def link_existing_match_to_competition(
-    existing,
-    competition_info,
-    external_provider,
-):
-    """
-    يربط المباراة اليدوية الموجودة بالبطولة بدل إنشاء مباراة ثانية.
-    """
-
-    fixture = competition_info["fixture"]
-    league_id = competition_info["league_id"]
-    season = competition_info.get("season")
-
-    league = fixture.get("league") or {}
-
-    fixture_id = fixture.get("fixture_id")
-
-    update = {
-        "league_id": league_id,
-        "league_name_en": league.get("name_en") or league.get("name"),
-        "league_name_ar": league.get("name_ar") or league.get("name_en"),
-        "league_logo": league.get("logo"),
-        "season": league.get("season") or season,
-        "round_en": league.get("round_en"),
-        "round_ar": league.get("round_ar"),
-        "external_provider": external_provider or "fd",
-        "external_fixture_id": int(fixture_id),
-    }
-
-    await db.matches.update_one(
-        {"id": existing["id"]},
-        {"$set": update},
-    )
-
-    existing.update(update)
-
-    return existing
+    return result
 
 
 @api_router.post("/matches", response_model=MatchModel)
 async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
     if data.home_team == data.away_team:
         raise HTTPException(status_code=400, detail="لا يمكن أن يكون الفريقان متطابقين")
-
-    # ========================================================
-    # حماية من إضافة مباراة يدويًا إذا كانت موجودة في البطولات
-    # ========================================================
-
-    incoming_external_id = getattr(data, "external_fixture_id", None)
-    incoming_provider = getattr(data, "external_provider", None) or "fd"
-
-    competition_fixture = await find_competition_fixture_for_match(
-        home_team=data.home_team,
-        away_team=data.away_team,
-        match_date=data.match_date,
-        external_fixture_id=incoming_external_id,
-    )
-
-    # إذا كانت الإضافة يدوية والمباراة موجودة ضمن البطولات:
-    # امنع إنشاء نسخة يدوية.
-    if (
-        incoming_external_id is None
-        and competition_fixture is not None
-    ):
-        fixture = competition_fixture["fixture"]
-        league = fixture.get("league") or {}
-
-        league_name = (
-            league.get("name_ar")
-            or league.get("name_en")
-            or "البطولات"
-        )
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"هذه المباراة موجودة ضمن {league_name}. "
-                "استخدم «إضافة من البطولات» لإضافتها وربطها بالدوري."
-            ),
-        )
-
     # السماح بجميع الفرق التي يعرضها /teams للإدارة
     available_teams = await get_teams()
 
@@ -2653,7 +1544,7 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
             return
         if code in codes:
             return
-        if not (code.startswith("fd:") or code.startswith("hl:")):
+        if not code.startswith("fd:"):
             return
         doc = {
             "code": code,
@@ -2663,7 +1554,7 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
             "logo": logo,
             "type": "club",
         }
-        await db.football_teams.update_one({"code": code}, {"$set": doc}, upsert=True)
+        await db.teams.update_one({"code": code}, {"$set": doc}, upsert=True)
         codes.add(code)
 
     await _ensure_fd_team(
@@ -2739,67 +1630,10 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
             status_code=400,
             detail=f"رمز الفريق الثاني غير صالح: {data.away_team}"
         )
-    # ========================================================
-    # بيانات البطولة
-    # إذا كانت المباراة قادمة من «إضافة من البطولات»
-    # نأخذ بيانات البطولة من المصدر نفسه.
-    # ========================================================
-
-    resolved_league_id = getattr(data, "league_id", None)
-    resolved_league_name_en = getattr(data, "league_name_en", None)
-    resolved_league_name_ar = getattr(data, "league_name_ar", None)
-    resolved_league_logo = getattr(data, "league_logo", None)
-    resolved_season = getattr(data, "season", None)
-    resolved_round_en = getattr(data, "round_en", None)
-    resolved_round_ar = getattr(data, "round_ar", None)
-
-    if competition_fixture is not None:
-        fixture = competition_fixture["fixture"]
-        league = fixture.get("league") or {}
-
-        resolved_league_id = competition_fixture["league_id"]
-        resolved_league_name_en = (
-            league.get("name_en")
-            or league.get("name")
-            or resolved_league_name_en
-        )
-        resolved_league_name_ar = (
-            league.get("name_ar")
-            or resolved_league_name_en
-            or resolved_league_name_ar
-        )
-        resolved_league_logo = (
-            league.get("logo")
-            or resolved_league_logo
-        )
-        resolved_season = (
-            league.get("season")
-            or competition_fixture.get("season")
-            or resolved_season
-        )
-        resolved_round_en = (
-            league.get("round_en")
-            or resolved_round_en
-        )
-        resolved_round_ar = (
-            league.get("round_ar")
-            or resolved_round_ar
-        )
-
     match = {
         "id": str(uuid.uuid4()),
         "home_team": data.home_team,
         "away_team": data.away_team,
-
-        # احفظ الاسم العربي الأصلي القادم من بيانات البطولة.
-        # هذا يمنع ظهور أسماء مترجمة/منطوقة آليًا لاحقًا.
-        "home_team_name_ar": getattr(data, "home_team_name_ar", None),
-        "home_team_name_en": getattr(data, "home_team_name_en", None),
-        "home_team_logo": getattr(data, "home_team_logo", None),
-        "away_team_name_ar": getattr(data, "away_team_name_ar", None),
-        "away_team_name_en": getattr(data, "away_team_name_en", None),
-        "away_team_logo": getattr(data, "away_team_logo", None),
-
         "match_date": data.match_date,
         "kickoff": data.kickoff,
         # keep legacy compatibility
@@ -2807,16 +1641,6 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
         "competition": data.competition,
         "stage": data.stage,
         "group_name": data.group_name,
-
-        # بيانات البطولة
-        "league_id": resolved_league_id,
-        "league_name_en": resolved_league_name_en,
-        "league_name_ar": resolved_league_name_ar,
-        "league_logo": resolved_league_logo,
-        "season": resolved_season,
-        "round_en": resolved_round_en,
-        "round_ar": resolved_round_ar,
-
         "home_score": None,
         "away_score": None,
         "status": "scheduled",
@@ -2835,9 +1659,8 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
         match['external_fixture_id'] = int(raw)
         match['external_provider'] = provider or 'fd'
 
-        # ====================================================
-        # منع التكرار بواسطة external_fixture_id
-        # ====================================================
+        # --- dedupe match by external_fixture_id ---
+        # If the same fixture is added again from competitions, return the existing match (no duplicates).
         existing = await db.matches.find_one(
             {
                 "external_fixture_id": match.get("external_fixture_id"),
@@ -2845,33 +1668,11 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
             },
             {"_id": 0},
         )
-
         if existing:
             return existing
 
-        # ====================================================
-        # إذا كانت المباراة أضيفت يدويًا سابقًا:
-        # اربط نفس المباراة بالبطولة بدل إنشاء نسخة جديدة.
-        # ====================================================
-        existing_manual = await db.matches.find_one(
-            {
-                "home_team": data.home_team,
-                "away_team": data.away_team,
-                "match_date": data.match_date,
-            },
-            {"_id": 0},
-        )
-
-        if existing_manual:
-            return await link_existing_match_to_competition(
-                existing_manual,
-                competition_fixture,
-                match.get("external_provider", "fd"),
-            )
-
 
     try:
-        match = _normalize_match_time_fields(match)
         await db.matches.insert_one(match.copy())
         return match
     except Exception as e:
@@ -2902,19 +1703,10 @@ async def update_match(match_id: str, data: MatchUpdate, _staff=Depends(require_
             raise HTTPException(status_code=400, detail='external_fixture_id غير صالح')
         updates['external_fixture_id'] = int(raw)
         updates['external_provider'] = provider or 'fd'
-    # normalize kickoff => always store UTC ISO (Z) + kickoff_utc + timestamp
-    if "kickoff" in updates or "kickoff_utc" in updates:
-        raw = updates.get("kickoff") or updates.get("kickoff_utc")
-        dt = _parse_dt_utc(raw, updates.get("timestamp"))
-        if dt:
-            kickoff_utc = _dt_to_iso_z(dt)
-            updates["kickoff"] = kickoff_utc
-            updates["kickoff_utc"] = kickoff_utc
-            updates["timestamp"] = int(dt.timestamp())
-            updates["match_date_utc"] = dt.date().isoformat()
-        else:
-            if "kickoff" in updates and "kickoff_utc" not in updates:
-                updates["kickoff_utc"] = updates["kickoff"]
+
+    # keep legacy compatibility: update kickoff_utc whenever kickoff updated
+    if "kickoff" in updates and "kickoff_utc" not in updates:
+        updates["kickoff_utc"] = updates["kickoff"]
     if updates:
         await db.matches.update_one({"id": match_id}, {"$set": updates})
     updated = await db.matches.find_one({"id": match_id}, {"_id": 0})
@@ -3228,158 +2020,6 @@ async def my_predictions(user=Depends(get_current_user)):
     return preds
 
 
-
-# ---------- Public User Predictions ----------
-@api_router.get("/predictions/public")
-async def public_predictions():
-    """
-    Read-only public predictions.
-    Only predictions for matches that have already started are returned.
-    This endpoint does NOT modify predictions, points, users, or matches.
-    """
-    now = datetime.now(timezone.utc)
-
-    # Get all prediction records first.
-    preds = await db.predictions.find(
-        {},
-        {"_id": 0}
-    ).sort("created_at", -1).to_list(10000)
-
-    if not preds:
-        return []
-
-    match_ids = list({
-        str(p.get("match_id"))
-        for p in preds
-        if p.get("match_id")
-    })
-
-    matches = await db.matches.find(
-        {"id": {"$in": match_ids}},
-        {"_id": 0}
-    ).to_list(10000)
-
-    mmap = {str(m.get("id")): m for m in matches}
-
-    # Collect team codes used by the matches.
-    team_codes = set()
-    for m in matches:
-        if m.get("home_team"):
-            team_codes.add(str(m["home_team"]))
-        if m.get("away_team"):
-            team_codes.add(str(m["away_team"]))
-
-    teams = await db.teams.find(
-        {"code": {"$in": list(team_codes)}},
-        {"_id": 0}
-    ).to_list(10000) if team_codes else []
-
-    tmap = {str(t.get("code")): t for t in teams}
-
-    # User names are public display names only.
-    user_ids = list({
-        str(p.get("user_id"))
-        for p in preds
-        if p.get("user_id")
-    })
-
-    users = await db.users.find(
-        {"id": {"$in": user_ids}},
-        {"_id": 0, "id": 1, "name": 1, "avatar": 1}
-    ).to_list(10000) if user_ids else []
-
-    umap = {str(u.get("id")): u for u in users}
-
-    rows = []
-
-    for p in preds:
-        match_id = str(p.get("match_id") or "")
-        m = mmap.get(match_id)
-
-        # Do not expose orphan predictions.
-        if not m:
-            continue
-
-        # Public predictions become visible only after kickoff.
-        kickoff_value = m.get("kickoff_utc") or m.get("kickoff")
-
-        started = m.get("status") in {
-            "live",
-            "started",
-            "in_progress",
-            "finished"
-        }
-
-        if not started and kickoff_value:
-            try:
-                kickoff_dt = datetime.fromisoformat(
-                    str(kickoff_value).replace("Z", "+00:00")
-                )
-
-                if kickoff_dt.tzinfo is None:
-                    kickoff_dt = kickoff_dt.replace(tzinfo=timezone.utc)
-
-                started = kickoff_dt <= now
-            except (ValueError, TypeError):
-                started = False
-
-        if not started:
-            continue
-
-        home_code = str(m.get("home_team") or "")
-        away_code = str(m.get("away_team") or "")
-
-        home_team = tmap.get(home_code, {})
-        away_team = tmap.get(away_code, {})
-
-        home_name_ar = (
-            home_team.get("name_ar")
-            or m.get("home_team_name")
-            or m.get("home_name")
-            or home_code
-        )
-
-        away_name_ar = (
-            away_team.get("name_ar")
-            or m.get("away_team_name")
-            or m.get("away_name")
-            or away_code
-        )
-
-        user = umap.get(str(p.get("user_id")), {})
-
-        rows.append({
-            "id": p.get("id"),
-            "match_id": match_id,
-
-            "home_team": home_code,
-            "away_team": away_code,
-            "home_team_name": home_name_ar,
-            "away_team_name": away_name_ar,
-
-            "pred_home": p.get("home_score"),
-            "pred_away": p.get("away_score"),
-
-            "user_name": user.get("name") or "مستخدم",
-            "user_avatar": user.get("avatar"),
-
-            "created_at": p.get("created_at"),
-
-            "kickoff": kickoff_value,
-            "status": m.get("status"),
-
-            "competition": (
-                m.get("league_name_ar")
-                or m.get("competition")
-                or m.get("league_name_en")
-                or ""
-            ),
-            "league_id": m.get("league_id"),
-        })
-
-    return rows
-
-
 # ---------- Leaderboard ----------
 
 @api_router.post("/competition/predictions", response_model=PredictionModel)
@@ -3610,274 +2250,79 @@ async def competition_prediction_stats(
 
 
 @api_router.get("/leaderboard", response_model=List[LeaderboardEntry])
-async def leaderboard(period: str = "all"):
-    """
-    لوحة المتصدرين:
-    - weekly  = آخر 7 أيام
-    - monthly = آخر 30 يوم
-    - all     = كل الوقت
-
-    لا يتم تعديل total_points للمستخدمين.
-    يتم فقط حساب نقاط الفترة المطلوبة من predictions.
-    """
-
-    from datetime import datetime, timedelta, timezone
-
-    period = (period or "all").lower().strip()
-
-    if period not in {"weekly", "monthly", "all"}:
-        period = "all"
-
-    now = datetime.now(timezone.utc)
-
-    if period == "weekly":
-        # الأسبوع يبدأ يوم الجمعة وينتهي يوم الخميس.
-        days_since_friday = (now.weekday() - 4) % 7
-
-        period_start = (
-            now - timedelta(days=days_since_friday)
-        ).replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-
-    elif period == "monthly":
-        # الشهر يبدأ من أول يوم في الشهر الساعة 00:00.
-        period_start = now.replace(
-            day=1,
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-
-    else:
-        period_start = None
-
-    lookup_pipeline = [
-        {
-            "$match": {
-                "$expr": {
-                    "$eq": ["$user_id", "$$uid"]
-                }
-            }
-        }
-    ]
-
-    # الأسبوعي/الشهري يعتمد على وقت احتساب نتيجة المباراة،
-    # وليس وقت إنشاء التوقع.
-    #
-    # لا يتم تعديل points أو total_points أو نتائج المباريات.
-    if period_start is not None:
-        lookup_pipeline.extend([
-            {
-                "$lookup": {
-                    "from": "matches",
-                    "let": {"prediction_match_id": "$match_id"},
-                    "pipeline": [
-                        {
-                            "$match": {
-                                "$expr": {
-                                    "$eq": ["$id", "$$prediction_match_id"]
-                                }
-                            }
-                        },
-                        {
-                            "$project": {
-                                "_id": 0,
-                                "result_updated_at": 1,
-                            }
-                        },
-                    ],
-                    "as": "matched_match",
-                }
-            },
-            {
-                "$unwind": {
-                    "path": "$matched_match",
-                    "preserveNullAndEmptyArrays": False,
-                }
-            },
-            {
-                "$match": {
-                    "$expr": {
-                        "$gte": [
-                            {
-                                "$convert": {
-                                    "input": "$matched_match.result_updated_at",
-                                    "to": "date",
-                                    "onError": datetime(
-                                        1970, 1, 1, tzinfo=timezone.utc
-                                    ),
-                                    "onNull": datetime(
-                                        1970, 1, 1, tzinfo=timezone.utc
-                                    ),
-                                }
-                            },
-                            period_start,
-                        ]
-                    }
-                }
-            },
-        ])
-
-    lookup_pipeline.append({
-        "$group": {
-            "_id": None,
-            "predictions_count": {"$sum": 1},
-            "total_points": {
-                "$sum": {
-                    "$convert": {
-                        "input": {"$ifNull": ["$points", 0]},
-                        "to": "long",
-                        "onError": 0,
-                        "onNull": 0,
-                    }
-                }
-            },
-            "exact_count": {
-                "$sum": {
-                    "$cond": [
-                        {"$eq": ["$points", 3]},
-                        1,
-                        0
-                    ]
-                }
-            },
-            "correct_outcome_count": {
-                "$sum": {
-                    "$cond": [
-                        {"$eq": ["$points", 1]},
-                        1,
-                        0
-                    ]
-                }
-            },
-            "tiebreak": {
-                "$sum": {
-                    "$cond": [
-                        {"$gt": [{"$ifNull": ["$points", 0]}, 0]},
-                        {
-                            "$toLong": {
-                                "$ifNull": [
-                                    {
-                                        "$convert": {
-                                            "input": "$created_at",
-                                            "to": "date",
-                                            "onError": datetime(1970, 1, 1, tzinfo=timezone.utc),
-                                            "onNull": datetime(1970, 1, 1, tzinfo=timezone.utc),
-                                        }
-                                    },
-                                    datetime(1970, 1, 1, tzinfo=timezone.utc)
-                                ]
-                            }
-                        },
-                        0
-                    ]
-                }
-            }
-        }
-    })
-
+async def leaderboard():
     pipeline = [
-        {
-            "$match": {
-                "role": {"$ne": "admin"}
-            }
-        },
-        {
-            "$project": {
-                "_id": 0,
-                "user_id": "$id",
-                "name": 1,
-                "avatar": 1,
-                "total_points_all": {
-                    "$ifNull": ["$total_points", 0]
-                },
-            }
-        },
-        {
-            "$lookup": {
-                "from": "predictions",
-                "let": {"uid": "$user_id"},
-                "pipeline": lookup_pipeline,
-                "as": "stats"
-            }
-        },
-        {
-            "$addFields": {
-                "stats": {
-                    "$arrayElemAt": ["$stats", 0]
-                }
-            }
-        },
-        {
-            "$addFields": {
-                "predictions_count": {
-                    "$ifNull": ["$stats.predictions_count", 0]
-                },
-                "exact_count": {
-                    "$ifNull": ["$stats.exact_count", 0]
-                },
-                "correct_outcome_count": {
-                    "$ifNull": ["$stats.correct_outcome_count", 0]
-                },
-                "period_points": {
-                    "$ifNull": ["$stats.total_points", 0]
-                },
-                "_tiebreak": {
-                    "$cond": [
-                        {
-                            "$gt": [
-                                {"$ifNull": ["$stats.tiebreak", 0]},
+        {"$match": {"role": {"$ne": "admin"}}},
+        {"$project": {
+            "_id": 0,
+            "user_id": "$id",
+            "name": 1,
+            "avatar": 1,
+            "total_points": {"$ifNull": ["$total_points", 0]},
+        }},
+        {"$lookup": {
+            "from": "predictions",
+            "let": {"uid": "$user_id"},
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": ["$user_id", "$$uid"]}}},
+                {"$group": {
+                    "_id": None,
+                    "predictions_count": {"$sum": 1},
+                    "exact_count": {
+                        "$sum": {"$cond": [{"$eq": ["$points", 3]}, 1, 0]}
+                    },
+                    "correct_outcome_count": {
+                        "$sum": {"$cond": [{"$eq": ["$points", 1]}, 1, 0]}
+                    },
+                    "tiebreak": {
+                        "$sum": {
+                            "$cond": [
+                                {"$gt": ["$points", 0]},
+                                {"$toLong": {"$ifNull": [{"$toDate": "$created_at"}, "1970-01-01T00:00:00Z"]}},
                                 0
                             ]
-                        },
-                        {"$ifNull": ["$stats.tiebreak", 0]},
-                        999999999999999999
-                    ]
-                }
+                        }
+                    }
+                }}
+            ],
+            "as": "stats"
+        }},
+        {"$addFields": {
+            "stats": {"$arrayElemAt": ["$stats", 0]}
+        }},
+        {"$addFields": {
+            "predictions_count": {"$ifNull": ["$stats.predictions_count", 0]},
+            "exact_count": {"$ifNull": ["$stats.exact_count", 0]},
+            "correct_outcome_count": {"$ifNull": ["$stats.correct_outcome_count", 0]},
+            "_tiebreak": {
+                "$cond": [
+                    {"$gt": [{"$ifNull": ["$stats.tiebreak", 0]}, 0]},
+                    {"$ifNull": ["$stats.tiebreak", 0]},
+                    999999999999999999
+                ]
             }
-        },
-        {
-            "$addFields": {
-                "display_points": (
-                    "$total_points_all"
-                    if period == "all"
-                    else "$period_points"
-                )
-            }
-        },
-        {
-            "$sort": {
-                "display_points": -1,
-                "exact_count": -1,
-                "correct_outcome_count": -1,
-                "_tiebreak": 1
-            }
-        },
-        {
-            "$limit": 100
-        },
-        {
-            "$project": {
-                "user_id": 1,
-                "name": 1,
-                "avatar": 1,
-                "total_points": "$display_points",
-                "predictions_count": 1,
-                "exact_count": 1,
-                "correct_outcome_count": 1
-            }
-        }
+        }},
+        {"$sort": {
+            "total_points": -1,
+            "exact_count": -1,
+            "correct_outcome_count": -1,
+            "_tiebreak": 1
+        }},
+        {"$limit": 100},
+        {"$project": {
+            "user_id": 1,
+            "name": 1,
+            "avatar": 1,
+            "total_points": 1,
+            "predictions_count": 1,
+            "exact_count": 1,
+            "correct_outcome_count": 1
+        }}
     ]
 
     rows = await db.users.aggregate(pipeline).to_list(100)
 
     out = []
-
     for i, r in enumerate(rows, start=1):
         out.append({
             "user_id": r["user_id"],
@@ -3886,12 +2331,9 @@ async def leaderboard(period: str = "all"):
             "total_points": int(r.get("total_points", 0)),
             "predictions_count": int(r.get("predictions_count", 0)),
             "exact_count": int(r.get("exact_count", 0)),
-            "correct_outcome_count": int(
-                r.get("correct_outcome_count", 0)
-            ),
+            "correct_outcome_count": int(r.get("correct_outcome_count", 0)),
             "rank": i,
         })
-
     return out
 
 
@@ -4153,31 +2595,13 @@ async def sync_results_from_thesportsdb():
     try:
         events = await fetch_world_cup_events()
     except Exception as e:
-        # TheSportsDB may temporarily return 503.
-        # This must NOT be treated as an application failure and must
-        # NOT expose the provider error in the Admin dashboard.
-        logger.warning(f"TheSportsDB temporarily unavailable: {e}")
-
+        logger.warning(f"TheSportsDB fetch failed: {e}")
         await db.app_state.update_one(
             {"key": "last_sync"},
-            {"$set": {
-                "key": "last_sync",
-                "at": sync_start,
-                "ok": True,
-                "updated": 0,
-                "checked": 0,
-                "source_unavailable": True,
-                "error": None,
-            }},
+            {"$set": {"key": "last_sync", "at": sync_start, "ok": False, "error": str(e), "updated": 0}},
             upsert=True,
         )
-
-        return {
-            "updated": 0,
-            "checked": 0,
-            "synced_at": sync_start,
-            "source_unavailable": True,
-        }
+        return {"updated": 0, "checked": 0, "error": str(e), "synced_at": sync_start}
 
     updated = 0
     checked = 0
@@ -4746,7 +3170,6 @@ async def football_leagues(search: Optional[str] = None):
 
 @api_router.get("/football/fixtures")
 async def football_fixtures(
-    request: Request,
     date: Optional[str] = None,
     league_id: Optional[int] = None,
     season: Optional[int] = None,
@@ -4755,16 +3178,8 @@ async def football_fixtures(
     status_short: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
-    tz: Optional[str] = Query(None),
-    tz_offset: Optional[int] = Query(None),
 ):
-    # توقيت المستخدم الموحد لجميع صفحات المباريات
-    tzinfo, apply_local, tz, tz_offset = _request_timezone_context(
-        request, tz, tz_offset
-    )
-
     params = {}
-
     if date:
         params["date"] = date
     if from_date:
@@ -4793,116 +3208,44 @@ async def football_fixtures(
 
     resp = payload.get("response") or []
     items = [simplify_fixture(x) for x in resp]
-
-    # تحويل كل Fixture إلى الوقت المحلي للمستخدم مع الإبقاء على UTC.
-    decorated = [
-        _decorate_match_time_fields(item, tzinfo, apply_local)
-        for item in items
-    ]
-    decorated.sort(key=lambda x: x.get("timestamp") or 0)
-
-    return {"count": len(decorated), "items": decorated}
+    return {"count": len(items), "items": items}
 
 
 @api_router.get("/football/fixtures/today")
-async def football_today(
-    request: Request,
-    tz: Optional[str] = Query(None),
-    tz_offset: Optional[int] = Query(None),
-):
-    tzinfo, _, tz, tz_offset = _request_timezone_context(
-        request, tz, tz_offset
-    )
-
-    # اليوم حسب منطقة المستخدم وليس حسب UTC
-    today = datetime.now(tzinfo).date().isoformat()
-
-    return await football_fixtures(
-        request=request,
-        date=today,
-        tz=tz,
-        tz_offset=tz_offset,
-    )
+async def football_today():
+    today = datetime.now(timezone.utc).date().isoformat()
+    return await football_fixtures(date=today)
 
 
 @api_router.get("/football/fixtures/upcoming")
-async def football_upcoming(
-    request: Request,
-    days: int = 3,
-    tz: Optional[str] = Query(None),
-    tz_offset: Optional[int] = Query(None),
-):
+async def football_upcoming(days: int = 3):
     days = max(1, min(days, 14))
-
-    tzinfo, _, tz, tz_offset = _request_timezone_context(
-        request, tz, tz_offset
-    )
-
-    # الفترة القادمة حسب تاريخ المستخدم المحلي
-    now_local = datetime.now(tzinfo).date()
-    from_date = now_local.isoformat()
-    to_date = (now_local + timedelta(days=days)).isoformat()
-
-    return await football_fixtures(
-        request=request,
-        from_date=from_date,
-        to_date=to_date,
-        tz=tz,
-        tz_offset=tz_offset,
-    )
+    now = datetime.now(timezone.utc).date()
+    from_date = now.isoformat()
+    to_date = (now + timedelta(days=days)).isoformat()
+    return await football_fixtures(from_date=from_date, to_date=to_date)
 
 
 @api_router.get("/football/fixtures/live")
-async def football_live(
-    request: Request,
-    tz: Optional[str] = Query(None),
-    tz_offset: Optional[int] = Query(None),
-):
-    return await football_fixtures(
-        request=request,
-        live=True,
-        tz=tz,
-        tz_offset=tz_offset,
-    )
+async def football_live():
+    return await football_fixtures(live=True)
 
 
 @api_router.get("/football/fixtures/finished")
-async def football_finished(
-    request: Request,
-    date: Optional[str] = None,
-    tz: Optional[str] = Query(None),
-    tz_offset: Optional[int] = Query(None),
-):
-    tzinfo, apply_local, tz, tz_offset = _request_timezone_context(
-        request, tz, tz_offset
-    )
-
-    # استخدم يوم المستخدم المحلي عند عدم إرسال date
-    d = date or datetime.now(tzinfo).date().isoformat()
-
+async def football_finished(date: Optional[str] = None):
+    d = date or datetime.now(timezone.utc).date().isoformat()
+    # status=FT returns finished, but some competitions use AET/PEN; for broad we fetch date and filter here
     payload = await cached_api_football_get(
         "/fixtures",
         {"date": d},
         ttl_seconds=60,
     )
-
     resp = payload.get("response") or []
     items = []
-
     for x in resp:
         short = ((x.get("fixture") or {}).get("status") or {}).get("short")
         if short in API_FOOTBALL_FINISHED_SHORT:
-            fixture = simplify_fixture(x)
-            items.append(
-                _decorate_match_time_fields(
-                    fixture,
-                    tzinfo,
-                    apply_local,
-                )
-            )
-
-    items.sort(key=lambda x: x.get("timestamp") or 0)
-
+            items.append(simplify_fixture(x))
     return {"count": len(items), "items": items}
 
 
@@ -5907,689 +4250,6 @@ async def get_challenge_status():
 # ===== End Challenge Lock API =====
 
 
-
-# ============================================================
-# AUTO SYNC RESULTS FROM FOOTBALL-DATA.ORG
-# ============================================================
-
-
-async def sync_results_from_highlightly_saudi():
-    """
-    Sync finished Saudi Pro League (league 307) results from Highlightly.
-
-    IMPORTANT:
-    - Reads results from Highlightly only.
-    - Updates existing db.matches only.
-    - Does NOT create/delete matches.
-    - Does NOT modify predictions directly.
-    - Uses apply_match_result() so the existing points system remains intact.
-    """
-
-    sync_start = datetime.now(timezone.utc).isoformat()
-    checked = 0
-    updated = 0
-    skipped = 0
-    errors = []
-
-    try:
-        fixtures = await fetch_highlightly_matches(307, 2026)
-    except Exception as e:
-        logger.warning(
-            "HIGHLIGHTLY SAUDI RESULTS FETCH FAILED: %s",
-            e,
-        )
-        await db.app_state.update_one(
-            {"key": "last_sync_highlightly_saudi"},
-            {
-                "$set": {
-                    "key": "last_sync_highlightly_saudi",
-                    "at": sync_start,
-                    "ok": False,
-                    "checked": 0,
-                    "updated": 0,
-                    "skipped": 0,
-                    "errors": [str(e)],
-                }
-            },
-            upsert=True,
-        )
-        return {
-            "ok": False,
-            "checked": 0,
-            "updated": 0,
-            "skipped": 0,
-            "errors": [str(e)],
-            "synced_at": sync_start,
-        }
-
-    # Existing Saudi matches only.
-    matches = await db.matches.find(
-        {
-            "league_id": 307,
-        },
-        {
-            "_id": 0,
-            "id": 1,
-            "home_team": 1,
-            "away_team": 1,
-            "kickoff": 1,
-            "kickoff_utc": 1,
-            "status": 1,
-        },
-    ).to_list(1000)
-
-    # Resolve stored team codes such as fd:2501873 to their real team names.
-    # This is needed because Highlightly returns team names.
-    football_teams = await db.football_teams.find(
-        {},
-        {
-            "_id": 0,
-            "code": 1,
-            "name": 1,
-            "name_en": 1,
-            "name_ar": 1,
-        },
-    ).to_list(50000)
-
-    team_code_names = {}
-
-    for team in football_teams:
-        code = str(team.get("code") or "").strip()
-        if not code:
-            continue
-
-        names = [
-            team.get("name_en"),
-            team.get("name"),
-            team.get("name_ar"),
-        ]
-
-        names = [
-            str(name).strip()
-            for name in names
-            if name and str(name).strip()
-        ]
-
-        if names:
-            team_code_names[code] = names
-
-    logger.info(
-        "HIGHLIGHTLY SAUDI TEAM MAP: %s teams loaded",
-        len(team_code_names),
-    )
-
-    def normalize_team_name(value):
-        if value is None:
-            return ""
-        value = str(value).strip().casefold()
-        for ch in ".-_":
-            value = value.replace(ch, " ")
-        return " ".join(value.split())
-
-    def get_match_team_name(match, side):
-        value = match.get(f"{side}_team")
-
-        # Stored matches may use provider codes such as fd:2501873.
-        # Resolve those codes through football_teams before comparing
-        # with Highlightly team names.
-        raw_value = str(value or "").strip()
-
-        if raw_value in team_code_names:
-            names = team_code_names[raw_value]
-            if names:
-                return normalize_team_name(names[0])
-
-        return normalize_team_name(value)
-
-    def get_fixture_team_name(fixture, side):
-        team = (fixture.get("teams") or {}).get(side) or {}
-        return normalize_team_name(
-            team.get("name_en")
-            or team.get("name")
-        )
-
-    def parse_kickoff(value):
-        return _parse_dt(value)
-
-    def is_finished(fixture):
-        status = str(
-            fixture.get("status_short")
-            or fixture.get("status")
-            or ""
-        ).strip().casefold()
-
-        finished_values = {
-            "finished",
-            "ft",
-            "full time",
-            "full-time",
-            "ended",
-            "completed",
-            "complete",
-            "final",
-        }
-
-        return status in finished_values
-
-    for fixture in fixtures:
-        try:
-            if not is_finished(fixture):
-                skipped += 1
-                continue
-
-            goals = fixture.get("goals") or {}
-            home_score = goals.get("home")
-            away_score = goals.get("away")
-
-            if not isinstance(home_score, int) or not isinstance(away_score, int):
-                skipped += 1
-                continue
-
-            f_home = get_fixture_team_name(fixture, "home")
-            f_away = get_fixture_team_name(fixture, "away")
-
-            if not f_home or not f_away:
-                skipped += 1
-                continue
-
-            fixture_kickoff = parse_kickoff(
-                fixture.get("kickoff_utc")
-                or fixture.get("kickoff")
-                or fixture.get("date")
-            )
-
-            # Find the exact existing Saudi match.
-            candidates = []
-
-            for m in matches:
-                m_home = get_match_team_name(m, "home")
-                m_away = get_match_team_name(m, "away")
-
-                if not m_home or not m_away:
-                    continue
-
-                # Normal home/away match
-                exact_order = (
-                    m_home == f_home and
-                    m_away == f_away
-                )
-
-                if not exact_order:
-                    continue
-
-                score = 0
-
-                # Strongest match: same kickoff within 24 hours.
-                m_kickoff = parse_kickoff(
-                    m.get("kickoff_utc")
-                    or m.get("kickoff")
-                )
-
-                if fixture_kickoff and m_kickoff:
-                    diff = abs(
-                        (fixture_kickoff - m_kickoff).total_seconds()
-                    )
-
-                    if diff <= 86400:
-                        score += 100
-                    elif diff <= 172800:
-                        score += 50
-                    else:
-                        continue
-
-                candidates.append((score, m))
-
-            if not candidates:
-                skipped += 1
-                continue
-
-            candidates.sort(
-                key=lambda x: x[0],
-                reverse=True,
-            )
-
-            match = candidates[0][1]
-            checked += 1
-
-            await apply_match_result(
-                match["id"],
-                int(home_score),
-                int(away_score),
-                source="highlightly_saudi",
-            )
-
-            await db.matches.update_one(
-                {"id": match["id"]},
-                {
-                    "$set": {
-                        "result_provider": "highlightly",
-                        "result_source": "highlightly_saudi",
-                        "highlightly_fixture_id": fixture.get("id"),
-                    }
-                },
-            )
-
-            updated += 1
-
-            logger.info(
-                "HIGHLIGHTLY SAUDI RESULT APPLIED: %s vs %s %s-%s match=%s",
-                f_home,
-                f_away,
-                home_score,
-                away_score,
-                match["id"],
-            )
-
-        except Exception as e:
-            errors.append(str(e))
-            logger.warning(
-                "HIGHLIGHTLY SAUDI FIXTURE SYNC FAILED: %s",
-                e,
-            )
-
-    await db.app_state.update_one(
-        {"key": "last_sync_highlightly_saudi"},
-        {
-            "$set": {
-                "key": "last_sync_highlightly_saudi",
-                "at": sync_start,
-                "ok": True,
-                "checked": checked,
-                "updated": updated,
-                "skipped": skipped,
-                "errors": errors[:20],
-            }
-        },
-        upsert=True,
-    )
-
-    logger.info(
-        "HIGHLIGHTLY SAUDI RESULTS FINISHED updated=%s checked=%s skipped=%s errors=%s",
-        updated,
-        checked,
-        skipped,
-        len(errors),
-    )
-
-    return {
-        "ok": True,
-        "checked": checked,
-        "updated": updated,
-        "skipped": skipped,
-        "errors": errors,
-        "synced_at": sync_start,
-    }
-
-
-async def auto_sync_highlightly_saudi_results_loop():
-    """
-    Background Saudi Pro League result sync.
-    Runs every 5 minutes.
-    """
-
-    await asyncio.sleep(60)
-
-    while True:
-        try:
-            await sync_results_from_highlightly_saudi()
-        except Exception as e:
-            logger.warning(
-                "AUTO HIGHLIGHTLY SAUDI RESULTS LOOP FAILED: %s",
-                e,
-            )
-
-        await asyncio.sleep(300)
-
-
-@api_router.post("/admin/highlightly/saudi/sync-results")
-async def admin_highlightly_saudi_sync_results(
-    _staff=Depends(require_staff),
-):
-    return await sync_results_from_highlightly_saudi()
-
-
-@api_router.get("/admin/highlightly/saudi/last-sync")
-async def admin_highlightly_saudi_last_sync(
-    _staff=Depends(require_staff),
-):
-    doc = await db.app_state.find_one(
-        {"key": "last_sync_highlightly_saudi"},
-        {"_id": 0},
-    )
-
-    return doc or {
-        "key": "last_sync_highlightly_saudi",
-        "at": None,
-        "ok": None,
-        "checked": 0,
-        "updated": 0,
-        "skipped": 0,
-        "errors": [],
-    }
-
-
-async def sync_results_from_football_data():
-    """
-    Sync finished results for existing db.matches records whose
-    external_provider is fd / football_data.
-
-    IMPORTANT:
-    - Does NOT create new matches.
-    - Does NOT delete matches.
-    - Does NOT modify predictions directly.
-    - Uses apply_match_result() so prediction points and user totals
-      remain protected by the existing scoring logic.
-    """
-
-    sync_start = datetime.now(timezone.utc).isoformat()
-    now = datetime.now(timezone.utc)
-
-    updated = 0
-    checked = 0
-    skipped = 0
-    errors = []
-
-    # Only existing Football-Data.org matches.
-    matches = await db.matches.find(
-        {
-            "$or": [
-                {"external_provider": "fd"},
-                {"external_provider": "football_data"},
-            ],
-            "external_fixture_id": {"$exists": True},
-            "status": {"$ne": "finished"},
-        },
-        {
-            "_id": 0,
-            "id": 1,
-            "external_fixture_id": 1,
-            "league_id": 1,
-            "season": 1,
-            "kickoff": 1,
-            "kickoff_utc": 1,
-            "status": 1,
-        },
-    ).to_list(1000)
-
-    # Group matches by league so we make one Football-Data request
-    # per competition instead of one request per match.
-    league_matches = {}
-
-    for m in matches:
-        kickoff_value = m.get("kickoff") or m.get("kickoff_utc")
-        kickoff_dt = _parse_dt(kickoff_value)
-
-        # Do not query matches that have not started yet.
-        if kickoff_dt and kickoff_dt > now + timedelta(minutes=1):
-            skipped += 1
-            continue
-
-        league_id = m.get("league_id")
-
-        try:
-            league_id = int(league_id)
-        except Exception:
-            skipped += 1
-            continue
-
-        if league_id not in FOOTBALL_DATA_COMPETITIONS:
-            skipped += 1
-            continue
-
-        league_matches.setdefault(league_id, []).append(m)
-
-    for league_id, db_matches in league_matches.items():
-
-        # Existing Football-Data matches currently use the 2026 season.
-        # If a match explicitly has a season, use it; otherwise 2026.
-        seasons = set()
-
-        for m in db_matches:
-            try:
-                season = int(m.get("season") or 2026)
-            except Exception:
-                season = 2026
-            seasons.add(season)
-
-        for season in seasons:
-
-            try:
-                logger.info(
-                    "FD RESULTS SYNC: league=%s season=%s checking=%s",
-                    league_id,
-                    season,
-                    len(db_matches),
-                )
-
-                fresh_matches = await fetch_football_data_matches(
-                    league_id,
-                    season,
-                )
-
-                # Index Football-Data fixtures by their numeric ID.
-                by_fixture_id = {}
-
-                for fixture in fresh_matches:
-                    raw_id = (
-                        fixture.get("external_fixture_id")
-                        or fixture.get("fixture_id")
-                    )
-
-                    if raw_id is None:
-                        continue
-
-                    try:
-                        fixture_id = int(
-                            str(raw_id).replace("fd:", "")
-                        )
-                    except Exception:
-                        continue
-
-                    by_fixture_id[fixture_id] = fixture
-
-                for m in db_matches:
-
-                    raw_fid = m.get("external_fixture_id")
-
-                    try:
-                        fid = int(
-                            str(raw_fid).replace("fd:", "")
-                        )
-                    except Exception:
-                        continue
-
-                    item = by_fixture_id.get(fid)
-
-                    if not item:
-                        logger.info(
-                            "FD RESULT NOT FOUND fixture=%s league=%s",
-                            fid,
-                            league_id,
-                        )
-                        continue
-
-                    checked += 1
-
-                    status = (
-                        item.get("status") or {}
-                    )
-
-                    status_short = str(
-                        status.get("short") or ""
-                    ).upper()
-
-                    status_long = str(
-                        status.get("long") or ""
-                    ).upper()
-
-                    # Football-Data.org finished statuses.
-                    is_finished = (
-                        status_short == "FT"
-                        or status_long in {
-                            "FINISHED",
-                            "AWARDED",
-                        }
-                    )
-
-                    if not is_finished:
-                        continue
-
-                    goals = item.get("goals") or {}
-
-                    home_score = goals.get("home")
-                    away_score = goals.get("away")
-
-                    if not isinstance(home_score, int):
-                        continue
-
-                    if not isinstance(away_score, int):
-                        continue
-
-                    # Re-check DB before applying the result.
-                    # Prevent duplicate scoring/notifications.
-                    current = await db.matches.find_one(
-                        {"id": m["id"]},
-                        {
-                            "_id": 0,
-                            "status": 1,
-                        },
-                    )
-
-                    if not current:
-                        continue
-
-                    if current.get("status") == "finished":
-                        continue
-
-                    logger.info(
-                        "FD RESULT APPLY: fixture=%s score=%s-%s",
-                        fid,
-                        home_score,
-                        away_score,
-                    )
-
-                    await apply_match_result(
-                        m["id"],
-                        int(home_score),
-                        int(away_score),
-                        source="football_data",
-                    )
-
-                    await db.matches.update_one(
-                        {"id": m["id"]},
-                        {
-                            "$set": {
-                                "result_provider": "football_data",
-                                "external_provider": "fd",
-                                "external_fixture_id": fid,
-                                "result_updated_at": datetime.now(
-                                    timezone.utc
-                                ).isoformat(),
-                            }
-                        },
-                    )
-
-                    updated += 1
-
-            except Exception as e:
-                logger.exception(
-                    "FD RESULTS SYNC FAILED league=%s season=%s",
-                    league_id,
-                    season,
-                )
-                errors.append({
-                    "league_id": league_id,
-                    "season": season,
-                    "error": str(e),
-                })
-
-    await db.app_state.update_one(
-        {"key": "last_sync_football_data_results"},
-        {
-            "$set": {
-                "key": "last_sync_football_data_results",
-                "at": sync_start,
-                "ok": len(errors) == 0,
-                "updated": updated,
-                "checked": checked,
-                "skipped": skipped,
-                "errors": errors,
-            }
-        },
-        upsert=True,
-    )
-
-    logger.info(
-        "FD RESULTS SYNC FINISHED updated=%s checked=%s skipped=%s errors=%s",
-        updated,
-        checked,
-        skipped,
-        len(errors),
-    )
-
-    return {
-        "ok": len(errors) == 0,
-        "updated": updated,
-        "checked": checked,
-        "skipped": skipped,
-        "errors": errors,
-        "synced_at": sync_start,
-    }
-
-
-async def auto_sync_football_data_results_loop():
-    """
-    Automatically check Football-Data.org for finished results.
-
-    Runs every 5 minutes.
-    """
-
-    # Give the application time to finish startup.
-    await asyncio.sleep(60)
-
-    while True:
-        try:
-            await sync_results_from_football_data()
-        except Exception as e:
-            logger.exception(
-                "AUTO FOOTBALL-DATA RESULTS LOOP FAILED: %s",
-                e,
-            )
-
-        await asyncio.sleep(300)
-
-
-@api_router.post("/admin/football-data/sync-results")
-async def admin_football_data_sync_results(
-    _staff=Depends(require_staff),
-):
-    """
-    Manually trigger Football-Data.org result synchronization.
-    """
-    return await sync_results_from_football_data()
-
-
-@api_router.get("/admin/football-data/last-sync")
-async def admin_football_data_last_sync(
-    _staff=Depends(require_staff),
-):
-    doc = await db.app_state.find_one(
-        {"key": "last_sync_football_data_results"},
-        {"_id": 0},
-    )
-
-    return doc or {
-        "key": "last_sync_football_data_results",
-        "at": None,
-        "ok": None,
-        "updated": 0,
-        "checked": 0,
-        "skipped": 0,
-        "errors": [],
-    }
-
-
-
 @app.on_event("startup")
 async def on_startup():
     # Indexes for faster login, matches, predictions, leaderboard, notifications and chat
@@ -6657,76 +4317,45 @@ async def on_shutdown():
 
 
 @api_router.get("/live-matches")
-async def live_matches(
-    request: Request,
-    tz: Optional[str] = Query(None),
-    tz_offset: Optional[int] = Query(None),
-):
+async def live_matches():
     now = datetime.now(timezone.utc)
-
-    tzinfo, apply_local, _, _ = _request_timezone_context(
-        request,
-        tz,
-        tz_offset,
-    )
-
     items = []
 
     cursor = db.matches.find({}).sort("kickoff", 1)
-
     async for m in cursor:
         kickoff_raw = m.get("kickoff") or m.get("kickoff_utc") or ""
         status_value = m.get("status", "scheduled")
 
-        kickoff_dt = _parse_dt_utc(
-            kickoff_raw,
-            m.get("timestamp"),
-        )
+        try:
+            kickoff_dt = datetime.fromisoformat(str(kickoff_raw).replace("Z", "+00:00"))
+        except Exception:
+            kickoff_dt = None
 
         is_live = False
         minute = None
 
         if kickoff_dt:
             diff_min = int((now - kickoff_dt).total_seconds() / 60)
-
             if 0 <= diff_min <= 130 and status_value != "finished":
                 is_live = True
                 minute = max(1, min(diff_min, 120))
 
         if is_live or status_value in ["live", "in_progress", "finished"]:
-            display_match = _decorate_match_time_fields(
-                m,
-                tzinfo,
-                apply_local,
-            )
-
             items.append({
                 "id": m.get("id"),
                 "home_team": m.get("home_team"),
                 "away_team": m.get("away_team"),
                 "home_score": m.get("home_score"),
                 "away_score": m.get("away_score"),
-
-                # قيم العرض حسب توقيت المستخدم
-                "kickoff": display_match.get("kickoff"),
-                "match_date": display_match.get("match_date"),
-
-                # قيم مرجعية موحدة
-                "kickoff_utc": display_match.get("kickoff_utc"),
-                "kickoff_local": display_match.get("kickoff_local"),
-                "match_date_utc": display_match.get("match_date_utc"),
-                "match_date_local": display_match.get("match_date_local"),
-                "timestamp": display_match.get("timestamp"),
-
+                "kickoff": kickoff_raw,
                 "status": "live" if is_live else status_value,
                 "minute": minute,
                 "stage": m.get("stage"),
                 "group_name": m.get("group_name"),
             })
 
-    items.sort(key=lambda x: x.get("timestamp") or 0)
-
     return items
+
 
 
 @api_router.post("/admin/seed-test-live")
@@ -6764,577 +4393,69 @@ async def seed_test_live(current_user=Depends(require_admin)):
 
 
 
-
-# ==========================================================
-# SPORTSSCORE LIVE SOURCE
-# ==========================================================
-
-_SPORTSCORE_LIVE_CACHE = {
-    "time": 0,
-    "data": None,
-}
-
-_SPORTSCORE_LIVE_CACHE_SECONDS = 2
-
-async def _fetch_sportscore_live():
-    import re
-    import html
-    import time
-
-    url = "https://sportscore.com/ar/football/?filter=live"
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Linux; Android 11) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Mobile Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ar,en;q=0.9",
-    }
-
-    now = time.time()
-
-    # ------------------------------------------------------
-    # SERVER CACHE
-    # ------------------------------------------------------
-    if (
-        _SPORTSCORE_LIVE_CACHE.get("data") is not None
-        and now - _SPORTSCORE_LIVE_CACHE.get("time", 0)
-        < _SPORTSCORE_LIVE_CACHE_SECONDS
-    ):
-        return _SPORTSCORE_LIVE_CACHE["data"]
-
-    async with httpx.AsyncClient(
-        timeout=30,
-        headers=headers,
-        follow_redirects=True,
-    ) as client:
-
-        response = await client.get(url)
-        response.raise_for_status()
-
-    page = response.text
-
-    def clean(value):
-        if not value:
-            return None
-
-        value = html.unescape(value)
-        value = re.sub(r"\s+", " ", value)
-
-        return value.strip()
-
-    # ------------------------------------------------------
-    # نفس الـParser الذي تم اختباره بنجاح
-    # ------------------------------------------------------
-    pattern = re.compile(
-        r'<div[^>]+class="[^"]*d-flex align-items-center[^"]*"'
-        r'[^>]+data-match-id="([^"]+)"[^>]+data-live-row[^>]*>'
-        r'(.*?)'
-        r'</div>\s*</div>\s*</div>',
-        re.S,
-    )
-
-    blocks = pattern.findall(page)
-
-    matches = []
-
-    for match_id, block in blocks:
-
-        home = re.search(
-            r'data-live="home-score">\s*(?:<b>)?(\d+)',
-            block,
-            re.S,
-        )
-
-        away = re.search(
-            r'data-live="away-score">\s*(?:<b>)?(\d+)',
-            block,
-            re.S,
-        )
-
-        status_match = re.search(
-            r'data-live="status">\s*([^<]+)',
-            block,
-            re.S,
-        )
-
-        teams = re.findall(
-            r'class="sc-team-link[^"]*"'
-            r'[^>]*title="[^"]*hub">([^<]+)</a>',
-            block,
-            re.S,
-        )
-
-        logos = re.findall(
-            r'<img[^>]+class="icon-circuit"[^>]+src="([^"]+)"',
-            block,
-            re.S,
-        )
-
-        if len(teams) < 2:
-            continue
-
-        # --------------------------------------------------
-        # Match URL
-        # --------------------------------------------------
-        match_url = None
-
-        url_match = re.search(
-            r'href="(/ar/football/match/[^"]+/)"',
-            block,
-            re.S,
-        )
-
-        if url_match:
-            match_url = "https://sportscore.com" + url_match.group(1)
-
-        # --------------------------------------------------
-        # وقت المباراة
-        # --------------------------------------------------
-        utc_match = re.search(
-            r'data-utc="([^"]+)"',
-            block,
-            re.S,
-        )
-
-        start_time = utc_match.group(1) if utc_match else None
-
-        # --------------------------------------------------
-        # الدقيقة
-        # --------------------------------------------------
-        elapsed = None
-
-        if status_match:
-            raw_status = clean(status_match.group(1))
-
-            if raw_status:
-                minute_match = re.search(r'(\d+)', raw_status)
-
-                if minute_match:
-                    try:
-                        elapsed = int(minute_match.group(1))
-                    except Exception:
-                        elapsed = None
-
-        # --------------------------------------------------
-        # اسم البطولة
-        # --------------------------------------------------
-        competition = None
-
-        competition_match = re.search(
-            r'class="competition-name[^"]*"[^>]*>'
-            r'\s*([^<]+?)\s*</a>',
-            block,
-            re.S,
-        )
-
-        if competition_match:
-            competition = clean(competition_match.group(1))
-
-        # بعض صفحات SportScore تضع البطولة خارج block المباراة.
-        # في هذه الحالة نبحث في جزء قريب من المباراة.
-        if not competition:
-            nearby = page[max(0, page.find(match_id) - 5000):page.find(match_id) + 500]
-
-            competition_match = re.search(
-                r'class="competition-name[^"]*"[^>]*>'
-                r'\s*([^<]+?)\s*</a>',
-                nearby,
-                re.S,
-            )
-
-            if competition_match:
-                competition = clean(competition_match.group(1))
-
-        matches.append({
-            "id": match_id,
-
-            "home_team": clean(teams[0]),
-            "away_team": clean(teams[1]),
-
-            "home_team_name_ar": clean(teams[0]),
-            "away_team_name_ar": clean(teams[1]),
-
-            "home_team_name_en": clean(teams[0]),
-            "away_team_name_en": clean(teams[1]),
-
-            "home_logo": logos[0] if len(logos) > 0 else None,
-            "away_logo": logos[1] if len(logos) > 1 else None,
-
-            "home_team_id": None,
-            "away_team_id": None,
-
-            "league": competition or "مباراة مباشرة",
-            "league_name_ar": competition or "مباراة مباشرة",
-            "league_name_en": competition or "Live",
-
-            "league_logo": None,
-            "league_id": None,
-
-            "home_score": (
-                int(home.group(1))
-                if home
-                else None
-            ),
-
-            "away_score": (
-                int(away.group(1))
-                if away
-                else None
-            ),
-
-            "status": (
-                clean(status_match.group(1))
-                if status_match
-                else "Live"
-            ),
-
-            "elapsed": elapsed,
-
-            "startTimestamp": start_time,
-
-            "slug": (
-                match_url.replace(
-                    "https://sportscore.com/ar/football/match/",
-                    ""
-                ).strip("/")
-                if match_url
-                else None
-            ),
-
-            "url": match_url,
-        })
-
-    payload = {
-        "success": True,
-        "count": len(matches),
-        "events": matches,
-        "source": "sportscore",
-        "updated": __import__("datetime").datetime.now(
-            __import__("datetime").timezone.utc
-        ).isoformat(),
-    }
-
-    _SPORTSCORE_LIVE_CACHE["time"] = now
-    _SPORTSCORE_LIVE_CACHE["data"] = payload
-
-    return payload
-
-
 @api_router.get("/external/live-matches")
 async def external_live_matches(all: bool = False):
-    """
-    Live Center
+    api_key = os.environ.get("API_FOOTBALL_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="API_FOOTBALL_KEY غير موجود")
 
-    المصدر الأساسي:
-    SportScore Live HTML
+    url = "https://v3.football.api-sports.io/fixtures"
+    headers = {"x-apisports-key": api_key}
 
-    الكاش:
-    45 ثانية على مستوى السيرفر.
+    async with httpx.AsyncClient(timeout=20) as client_http:
+        r = await client_http.get(url, headers=headers, params={"live": "all"})
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail=r.text)
 
-    نفس صيغة API القديمة:
-    {
-        success,
-        count,
-        events
+        payload = r.json()
+
+    ALLOWED_LIVE_LEAGUES = {
+        "UEFA Champions League",
+        "Premier League",
+        "La Liga",
+        "Bundesliga",
+        "Ligue 1",
+        "Saudi Pro League",
+        "FIFA World Cup",
+        "World Cup",
+        "UEFA Europa League",
+        "UEFA Europa Conference League",
     }
 
-    لا يتم لمس نظام النقاط أو التوقعات أو المستخدمين.
-    """
-
-    import time
-
-    try:
-        payload = await _fetch_sportscore_live()
-
-        return payload
-
-    except Exception as e:
-
-        logger.exception(
-            "SPORTSCORE LIVE ERROR: %s",
-            e,
-        )
-
-        # --------------------------------------------------
-        # في حالة فشل SportScore:
-        # أعد آخر بيانات ناجحة إن وجدت.
-        # --------------------------------------------------
-        cached = _SPORTSCORE_LIVE_CACHE.get("data")
-
-        if cached is not None:
-            cached = dict(cached)
-            cached["stale"] = True
-            return cached
-
-        raise HTTPException(
-            status_code=502,
-            detail=f"تعذر تحميل المباريات المباشرة من SportScore: {e}",
-        )
-
-
-
-
-
-# ==========================================================
-# SPORTSSCORE LIVE MATCH DETAILS
-# ==========================================================
-
-_SPORTSCORE_MATCH_DETAILS_CACHE = {}
-_SPORTSCORE_MATCH_DETAILS_CACHE_SECONDS = 1
-
-
-async def _fetch_sportscore_live_detail(slug: str):
-    """
-    يجلب صفحة:
-    https://sportscore.com/ar/football/match/{slug}/live/
-
-    الصفحة ترجع JSON مباشر يحتوي:
-    status / score / stats / latest_events
-    """
-
-    import time
-
-    slug = str(slug or "").strip().strip("/")
-
-    if not slug or not re.fullmatch(r"[A-Za-z0-9_-]+-vs-[A-Za-z0-9_-]+", slug):
-        raise HTTPException(
-            status_code=400,
-            detail="slug المباراة غير صالح"
-        )
-
-    now = time.time()
-
-    cached = _SPORTSCORE_MATCH_DETAILS_CACHE.get(slug)
-
-    if cached:
-        try:
-            if (
-                now - cached.get("time", 0)
-                < _SPORTSCORE_MATCH_DETAILS_CACHE_SECONDS
-            ):
-                return cached.get("data")
-        except Exception:
-            pass
-
-    url = (
-        "https://sportscore.com/ar/football/match/"
-        f"{slug}/live/"
-    )
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Linux; Android 11) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Mobile Safari/537.36"
-        ),
-        "Accept": "application/json,text/plain,*/*",
-        "Accept-Language": "ar,en;q=0.9",
-        "Referer": (
-            "https://sportscore.com/ar/football/"
-        ),
-    }
-
-    async with httpx.AsyncClient(
-        timeout=20,
-        headers=headers,
-        follow_redirects=True,
-    ) as client:
-
-        response = await client.get(url)
-
-    response.raise_for_status()
-
-    raw = response.text.strip()
-
-    try:
-        payload = response.json()
-    except Exception:
-        try:
-            import json
-            payload = json.loads(raw)
-        except Exception as e:
-            raise HTTPException(
-                status_code=502,
-                detail=f"SportScore live detail returned invalid JSON: {e}"
-            )
-
-    if not isinstance(payload, dict):
-        raise HTTPException(
-            status_code=502,
-            detail="SportScore live detail response is not an object"
-        )
-
-    # ------------------------------------------------------
-    # البيانات الأساسية
-    # ------------------------------------------------------
-
-    status_obj = payload.get("status") or {}
-    score = payload.get("score") or {}
-    stats = payload.get("stats") or {}
-    latest_events = payload.get("latest_events") or []
-
-    result = {
-        "success": True,
-        "source": "sportscore",
-
-        "slug": slug,
-        "url": url,
-
-        "status": status_obj.get("label"),
-        "status_id": status_obj.get("id"),
-        "is_live": bool(status_obj.get("is_live")),
-        "is_finished": bool(status_obj.get("is_finished")),
-        "is_not_started": bool(status_obj.get("is_not_started")),
-
-        "home_score": score.get("home"),
-        "away_score": score.get("away"),
-        "home_score_display": score.get("home_display"),
-        "away_score_display": score.get("away_display"),
-        "home_halftime": score.get("home_halftime"),
-        "away_halftime": score.get("away_halftime"),
-
-        "stats": {
-            "home_corners": stats.get("home_corners"),
-            "away_corners": stats.get("away_corners"),
-
-            "home_yellow_cards": stats.get("home_yellow_cards"),
-            "away_yellow_cards": stats.get("away_yellow_cards"),
-
-            "home_red_cards": stats.get("home_red_cards"),
-            "away_red_cards": stats.get("away_red_cards"),
-
-            "home_ball_possession": stats.get("home_ball_possession"),
-            "away_ball_possession": stats.get("away_ball_possession"),
-
-            "home_attacks": stats.get("home_attacks"),
-            "away_attacks": stats.get("away_attacks"),
-
-            "home_dangerous_attacks": stats.get(
-                "home_dangerous_attacks"
-            ),
-            "away_dangerous_attacks": stats.get(
-                "away_dangerous_attacks"
-            ),
-
-            "home_shots_on_target": stats.get(
-                "home_shots_on_target"
-            ),
-            "away_shots_on_target": stats.get(
-                "away_shots_on_target"
-            ),
-
-            "home_shots_off_target": stats.get(
-                "home_shots_off_target"
-            ),
-            "away_shots_off_target": stats.get(
-                "away_shots_off_target"
-            ),
-
-            "has_realtime_stats": bool(
-                stats.get("has_realtime_stats")
-            ),
-        },
-
-        "latest_events": latest_events,
-
-        "updated_at": payload.get("updated_at"),
-    }
-
-    _SPORTSCORE_MATCH_DETAILS_CACHE[slug] = {
-        "time": now,
-        "data": result,
-    }
-
-    return result
-
-
-@api_router.get("/external/live-match/{slug}")
-async def external_live_match_detail(slug: str):
-    """
-    تفاصيل مباراة Live واحدة من SportScore.
-
-    مثال:
-    /api/external/live-match/pisa-vs-empoli
-    """
-
-    try:
-        detail = await _fetch_sportscore_live_detail(slug)
-
-        # --------------------------------------------------
-        # نحاول إرفاق بيانات المباراة الموجودة في Live Center
-        # بدون إجراء طلب إضافي إلى SportScore.
-        # --------------------------------------------------
-
-        try:
-            live_payload = _SPORTSCORE_LIVE_CACHE.get("data")
-
-            if isinstance(live_payload, dict):
-                for match in live_payload.get("events", []):
-                    if match.get("slug") == slug:
-                        detail["id"] = match.get("id")
-                        detail["home_team"] = match.get("home_team")
-                        detail["away_team"] = match.get("away_team")
-
-                        detail["home_team_name_ar"] = (
-                            match.get("home_team_name_ar")
-                            or match.get("home_team")
-                        )
-
-                        detail["away_team_name_ar"] = (
-                            match.get("away_team_name_ar")
-                            or match.get("away_team")
-                        )
-
-                        detail["home_logo"] = match.get("home_logo")
-                        detail["away_logo"] = match.get("away_logo")
-
-                        detail["league"] = (
-                            match.get("league_name_ar")
-                            or match.get("league")
-                        )
-
-                        detail["league_name_ar"] = (
-                            match.get("league_name_ar")
-                            or match.get("league")
-                        )
-
-                        detail["league_name_en"] = (
-                            match.get("league_name_en")
-                            or match.get("league")
-                        )
-
-                        detail["league_logo"] = match.get("league_logo")
-                        detail["league_id"] = match.get("league_id")
-                        detail["startTimestamp"] = match.get(
-                            "startTimestamp"
-                        )
-
-                        break
-
-        except Exception as e:
-            logger.warning(
-                "SPORTSCORE LIVE LIST MERGE ERROR: %s",
-                e
-            )
-
-        return detail
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        logger.exception(
-            "SPORTSCORE LIVE MATCH DETAIL ERROR: %s",
-            e
-        )
-
-        raise HTTPException(
-            status_code=502,
-            detail=f"تعذر تحميل تفاصيل المباراة من SportScore: {e}"
-        )
+    items = []
+    for item in payload.get("response", []):
+        fixture = item.get("fixture", {})
+        league = item.get("league", {})
+
+        if not all and league.get("name") not in ALLOWED_LIVE_LEAGUES:
+            continue
+        teams = item.get("teams", {})
+        goals = item.get("goals", {})
+        status = fixture.get("status", {})
+
+        home = teams.get("home", {}) or {}
+        away = teams.get("away", {}) or {}
+
+        items.append({
+            "id": fixture.get("id"),
+            "league": league_ar_name(league.get("name")),
+            "league_en": league.get("name"),
+            "league_id": league.get("id"),
+            "country": league.get("country"),
+            "league_logo": league.get("logo"),
+            "home_team": team_ar_name(home.get("name")),
+            "away_team": team_ar_name(away.get("name")),
+            "home_logo": home.get("logo"),
+            "away_logo": away.get("logo"),
+            "home_score": goals.get("home"),
+            "away_score": goals.get("away"),
+            "elapsed": status.get("elapsed"),
+            "status": status.get("short"),
+            "status_long": status.get("long"),
+            "date": fixture.get("date"),
+        })
+
+    return items
 
 
 
@@ -7780,9 +4901,7 @@ async def start_auto_sync_results():
     asyncio.create_task(auto_sync_results_loop())
     asyncio.create_task(auto_match_reminders_loop())
     asyncio.create_task(auto_sync_api_football_results_loop())
-    asyncio.create_task(auto_sync_highlightly_saudi_results_loop())
     asyncio.create_task(auto_sync_competition_data_loop())
-    asyncio.create_task(auto_sync_football_data_results_loop())
 
 
 
@@ -8098,259 +5217,6 @@ async def enrich_matches_from_highlightly(matches: list):
                 break
 
     return matches
-
-
-
-async def fetch_highlightly_matches(league_id: int, season: int):
-    headers = {
-        "x-rapidapi-key": HIGHLIGHTLY_KEY
-    }
-
-    base_params = {
-        "leagueId": 262041 if int(league_id) == 307 else league_id,
-        "season": season,
-        "limit": 100,
-    }
-
-    def _kickoff_fields(date_value, timestamp):
-        kickoff_utc = None
-        match_date_mecca = None
-        kickoff_mecca = None
-        if date_value:
-            try:
-                dt = datetime.fromisoformat(
-                    str(date_value).replace("Z", "+00:00")
-                )
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                kickoff_utc = dt.isoformat().replace("+00:00", "Z")
-                local_dt = dt.astimezone(MECCA_TZ)
-                match_date_mecca = local_dt.date().isoformat()
-                kickoff_mecca = local_dt.isoformat()
-            except Exception:
-                pass
-        if kickoff_utc is None and timestamp is not None:
-            try:
-                dt = datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
-                kickoff_utc = dt.isoformat().replace("+00:00", "Z")
-                local_dt = dt.astimezone(MECCA_TZ)
-                match_date_mecca = local_dt.date().isoformat()
-                kickoff_mecca = local_dt.isoformat()
-            except Exception:
-                pass
-        return kickoff_utc, match_date_mecca, kickoff_mecca
-
-    from datetime import timedelta as _td
-    _MECCA_TZ = timezone(_td(hours=3))
-    fixtures = []
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        offset = 0
-
-        while True:
-            params = {
-                **base_params,
-                "offset": offset,
-            }
-
-            response = await client.get(
-                f"{HIGHLIGHTLY_BASE_URL}/matches",
-                headers=headers,
-                params=params,
-            )
-
-            response.raise_for_status()
-
-            data = response.json()
-
-            rows = data.get("data") or data.get("response") or []
-
-            for item in rows:
-                home = (
-                    item.get("homeTeam")
-                    or item.get("home_team")
-                    or {}
-                )
-
-                away = (
-                    item.get("awayTeam")
-                    or item.get("away_team")
-                    or {}
-                )
-
-                state = item.get("state") or {}
-                score = state.get("score") or {}
-                current_score = score.get("current")
-
-                # Normalize Highlightly status to the format used by the app.
-                raw_status = str(
-                    state.get("description") or ""
-                ).strip()
-
-                HIGHLIGHTLY_STATUS_MAP = {
-                    "Not started": "NS",
-                    "Scheduled": "NS",
-                    "Finished": "FT",
-                    "Full Time": "FT",
-                    "Full-time": "FT",
-                    "In Play": "LIVE",
-                    "Live": "LIVE",
-                    "Paused": "HT",
-                    "Postponed": "PST",
-                    "Cancelled": "CANC",
-                }
-
-                status_short = HIGHLIGHTLY_STATUS_MAP.get(
-                    raw_status,
-                    raw_status.upper().replace(" ", "_")
-                    if raw_status
-                    else "NS"
-                )
-
-                home_score = None
-                away_score = None
-
-                if isinstance(current_score, dict):
-                    home_score = current_score.get("home")
-                    away_score = current_score.get("away")
-
-                elif isinstance(current_score, (list, tuple)):
-                    if len(current_score) >= 2:
-                        home_score = current_score[0]
-                        away_score = current_score[1]
-
-                elif isinstance(current_score, str):
-                    try:
-                        parts = current_score.split("-")
-                        if len(parts) == 2:
-                            home_score = int(parts[0].strip())
-                            away_score = int(parts[1].strip())
-                    except (ValueError, TypeError):
-                        home_score = None
-                        away_score = None
-                elif isinstance(current_score, str):
-                    # Highlightly returns finished scores like "3 - 0"
-                    score_text = current_score.strip()
-                    try:
-                        parts = score_text.split("-")
-                        if len(parts) == 2:
-                            home_score = int(parts[0].strip())
-                            away_score = int(parts[1].strip())
-                    except (ValueError, TypeError):
-                        home_score = None
-                        away_score = None
-
-                date_value = item.get("date")
-                timestamp = item.get("timestamp")
-
-                if timestamp is None and date_value:
-                    try:
-                        timestamp = datetime.fromisoformat(
-                            date_value.replace("Z", "+00:00")
-                        ).timestamp()
-                    except Exception:
-                        timestamp = None
-
-                league = item.get("league") or {}
-                country = item.get("country") or {}
-                round_name = item.get("round")
-
-                (
-                    kickoff_utc_value,
-                    match_date_mecca_value,
-                    kickoff_mecca_value,
-                ) = _kickoff_fields(date_value, timestamp)
-                fixtures.append({
-                    "id": item.get("id"),
-                    "fixture_id": item.get("id"),
-                    "timestamp": timestamp,
-                    "date": date_value,
-                    "kickoff_utc": kickoff_utc_value,
-                    "kickoff": kickoff_utc_value,
-                    "match_date": match_date_mecca_value,
-                    "kickoff_mecca": kickoff_mecca_value,
-
-                    "league": {
-                        "id": league.get("id") or 262041,
-                        "name": league.get("name") or "Pro League",
-                        "name_en": league.get("name") or "Pro League",
-                        "round": round_name,
-                        "round_en": round_name,
-                        "country": country.get("name") or "Saudi Arabia",
-                    },
-
-                    "teams": {
-                        "home": {
-                            "id": home.get("id"),
-                            "name": home.get("name"),
-                            "name_en": home.get("name"),
-                            "logo": home.get("logo"),
-                        },
-                        "away": {
-                            "id": away.get("id"),
-                            "name": away.get("name"),
-                            "name_en": away.get("name"),
-                            "logo": away.get("logo"),
-                        },
-                    },
-
-                    "goals": {
-                        "home": home_score,
-                        "away": away_score,
-                    },
-
-                    "status": {
-                        "short": status_short,
-                        "long": raw_status,
-                    },
-                    "status_short": status_short,
-                    "clock": state.get("clock"),
-                })
-
-            pagination = data.get("pagination") or {}
-
-            total_count = pagination.get("totalCount")
-            current_offset = pagination.get("offset", offset)
-            current_limit = pagination.get("limit", len(rows))
-
-            if not rows:
-                break
-
-            next_offset = current_offset + current_limit
-
-            if (
-                total_count is not None
-                and next_offset >= total_count
-            ):
-                break
-
-            if len(rows) < current_limit:
-                break
-
-            offset = next_offset
-
-    fixtures.sort(
-        key=lambda x: x.get("timestamp") or 0
-    )
-
-    # منع التكرار (لأي سبب مستقبلي)
-    unique_fixtures = []
-    seen_ids = set()
-    for f in fixtures:
-        f_id = f.get("id") or f.get("fixture_id")
-        if f_id is None or f_id not in seen_ids:
-            seen_ids.add(f_id)
-            unique_fixtures.append(f)
-    fixtures = unique_fixtures
-
-    logger.info(
-        "HIGHLIGHTLY MATCHES: league=%s season=%s total=%s",
-        league_id,
-        season,
-        len(fixtures),
-    )
-
-    return fixtures
 
 
 async def fetch_football_data_matches(league_id: int, season: int):
@@ -8698,8 +5564,6 @@ async def get_competitions():
         # by its starting year: 2025.
         if int(row["id"]) == 2:
             effective_season = 2025
-        elif int(row["id"]) == 307:
-            effective_season = 2026
 
         row["api_current_season"] = row.get("current_season")
         row["current_season"] = effective_season
@@ -8814,21 +5678,9 @@ def localize_competition_items(kind: str, items: list) -> list:
 
             for side in ("home", "away"):
                 team = dict(teams.get(side) or {})
-                source_team_name = (
+                team["name_ar"] = team_ar_name(
                     team.get("name_en") or team.get("name")
                 )
-                existing_team_name_ar = team.get("name_ar")
-
-                if (
-                    existing_team_name_ar
-                    and str(existing_team_name_ar).strip().casefold()
-                    != str(source_team_name or "").strip().casefold()
-                ):
-                    team["name_ar"] = existing_team_name_ar
-                else:
-                    team["name_ar"] = team_ar_name(
-                        source_team_name
-                    )
                 teams[side] = team
 
             item["teams"] = teams
@@ -9007,20 +5859,6 @@ async def sync_competition_dataset(
             )
 
             match_source = "football_data"
-
-        elif league_id == 307:
-            logger.info(
-                "COMPETITION MATCHES REFRESH: Highlightly Saudi league=%s season=%s",
-                league_id,
-                season,
-            )
-
-            fixtures = await fetch_highlightly_matches(
-                league_id,
-                season
-            )
-
-            match_source = "highlightly"
 
         else:
             logger.info(
@@ -9406,42 +6244,23 @@ async def sync_competition(
 
 @api_router.get("/competitions/{league_id}/matches")
 async def get_competition_matches(
-    request: Request,
     league_id: int,
     season: Optional[int] = None,
-    tz: Optional[str] = Query(None),
-    tz_offset: Optional[int] = Query(None),
 ):
     # إخفاء مباريات كأس العالم فقط
     if league_id == 1:
         return []
-
-    tzinfo, apply_local, _, _ = _request_timezone_context(
-        request,
-        tz,
-        tz_offset,
-    )
 
     season = await resolve_competition_season(
         league_id,
         season,
     )
 
-    items = await load_competition_dataset(
+    return await load_competition_dataset(
         league_id,
         season,
         "matches",
     )
-
-    # بيانات البطولة من API-Football / Football-Data / Highlightly
-    # تمر من نفس محول الوقت المستخدم في /api/matches.
-    decorated = [
-        _decorate_match_time_fields(item, tzinfo, apply_local)
-        for item in (items or [])
-    ]
-    decorated.sort(key=lambda x: x.get("timestamp") or 0)
-
-    return decorated
 
 
 @api_router.get("/competitions/{league_id}/standings")
@@ -9789,227 +6608,6 @@ async def get_final_challenge_results(
 
 
 # ===== End Final World Cup Challenge API =====
-
-
-
-# ============================================================
-# 🧠 AI MATCH ANALYZER - Gemini
-# ============================================================
-@api_router.post("/ai/match-analysis")
-async def ai_match_analysis(request: Request):
-    """
-    تحليل المباراة بالذكاء الاصطناعي.
-    لا يغيّر النقاط أو التوقعات أو بيانات المباراة.
-    """
-
-    import os
-
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
-
-    if not api_key:
-        raise HTTPException(
-            status_code=503,
-            detail="مفتاح Gemini غير مهيأ في الباكيند"
-        )
-
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(
-            status_code=400,
-            detail="بيانات المباراة غير صالحة"
-        )
-
-    if not isinstance(body, dict):
-        raise HTTPException(
-            status_code=400,
-            detail="بيانات المباراة غير صالحة"
-        )
-
-    # نأخذ فقط البيانات المطلوبة للتحليل
-    home_team = body.get("home_team") or body.get("home_team_name_ar") or "الفريق الأول"
-    away_team = body.get("away_team") or body.get("away_team_name_ar") or "الفريق الثاني"
-
-    data = {
-        "home_team": home_team,
-        "away_team": away_team,
-        "league": body.get("league_name_ar") or body.get("league") or "غير معروف",
-        "home_score": body.get("home_score", 0),
-        "away_score": body.get("away_score", 0),
-        "status": body.get("status", "مباشر"),
-        "elapsed": body.get("elapsed"),
-        "stats": body.get("stats") or {},
-        "latest_events": body.get("latest_events") or [],
-    }
-
-    prompt = f"""
-أنت محلل كرة قدم محترف داخل تطبيق "ملك التوقعات".
-
-مهمتك تقديم تحليل مباشر واحترافي للمباراة اعتمادًا حصريًا على البيانات الموجودة في الطلب.
-
-قواعد صارمة:
-- اكتب باللغة العربية فقط.
-- لا تستخدم أي كلمات أو جمل باللغة الإنجليزية.
-- لا تستخدم Markdown مثل النجوم أو علامات # أو الجداول.
-- استخدم العناوين التالية حرفيًا مع الرموز التعبيرية.
-- لا تخترع أي إحصائية أو هدف أو بطاقة أو حدث أو معلومة غير موجودة في البيانات.
-- إذا كانت معلومة غير متوفرة، اذكر بوضوح: "البيانات غير متوفرة".
-- لا تعتبر الفريق المتقدم بالضرورة هو الفريق الأخطر؛ قيّم ذلك من الإحصائيات والأحداث المتوفرة.
-- إذا لم توجد إحصائيات أو أحداث كافية، لا تدّعِ معرفة الفريق الأفضل فنيًا.
-- يمكنك استنتاج الحالة العامة من النتيجة والدقيقة، لكن وضّح أنها قراءة للمباراة وليست معلومة مؤكدة.
-- لا تقدم ضمانًا للفوز أو تسجيل هدف.
-- لا تقل إنك شاهدت المباراة أو تملك معلومات غير موجودة في البيانات.
-- لا تكرر نفس المعلومة في أكثر من قسم.
-- اجعل التحليل واضحًا ومفيدًا للمستخدم وسهل القراءة على الهاتف.
-
-بيانات المباراة:
-
-الفريق الأول:
-{data["home_team"]}
-
-الفريق الثاني:
-{data["away_team"]}
-
-البطولة:
-{data["league"]}
-
-النتيجة الحالية:
-{data["home_score"]} - {data["away_score"]}
-
-حالة المباراة:
-{data["status"]}
-
-الدقيقة:
-{data["elapsed"]}
-
-الإحصائيات المتوفرة:
-{data["stats"]}
-
-آخر الأحداث:
-{data["latest_events"]}
-
-اكتب النتيجة بهذا الشكل بالضبط:
-
-🔥 قراءة المباراة
-اذكر وضع المباراة الحالي، النتيجة، الدقيقة، ومن يملك الأفضلية إن كانت البيانات تسمح بذلك.
-
-⚽ الفريق الأخطر حاليًا
-حدد الفريق الأخطر فقط إذا كانت الإحصائيات أو الأحداث تدعم ذلك.
-اذكر السبب باختصار.
-
-📊 تحليل الإحصائيات
-حلل فقط الإحصائيات الموجودة فعليًا.
-ركز على الاستحواذ، التسديدات، التسديدات على المرمى، الركنيات، البطاقات وأي إحصائيات أخرى متوفرة.
-
-🎯 السيناريو الأقرب
-حلل ما يمكن أن يحدث في الدقائق المتبقية بناءً على البيانات الحالية.
-استخدم عبارات مثل "قد" و"من المرجح" و"السيناريو الأقرب" بدل الجزم.
-
-⚠️ نقطة يجب الانتباه لها
-اذكر أهم عامل قد يؤثر على سير المباراة بناءً على البيانات المتوفرة.
-
-🧠 الخلاصة
-قدم خلاصة قصيرة من سطرين أو ثلاثة توضح الصورة الحالية للمباراة.
-
-مهم جدًا:
-هذا تحليل رياضي مبني على البيانات المتاحة فقط، وليس ضمانًا لنتيجة المباراة.
-"""
-
-
-
-    try:
-        import httpx
-
-        url = (
-            "https://generativelanguage.googleapis.com/"
-            "v1beta/models/gemini-3.6-flash:generateContent"
-        )
-
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
-                        {"text": prompt}
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.25,
-                "maxOutputTokens": 1800,
-                "thinkingConfig": {
-                    "thinkingLevel": "minimal"
-                }
-            }
-        }
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                url,
-                headers={
-                    "Content-Type": "application/json",
-                    "x-goog-api-key": api_key,
-                },
-                json=payload,
-            )
-
-        if response.status_code != 200:
-            try:
-                error_data = response.json()
-            except Exception:
-                error_data = response.text[:500]
-
-            print("Gemini API error:", response.status_code, error_data)
-
-            raise HTTPException(
-                status_code=502,
-                detail="تعذر الحصول على تحليل الذكاء الاصطناعي"
-            )
-
-        result = response.json()
-
-        candidates = result.get("candidates") or []
-
-        if not candidates:
-            raise HTTPException(
-                status_code=502,
-                detail="لم يرجع الذكاء الاصطناعي تحليلًا"
-            )
-
-        parts = (
-            candidates[0]
-            .get("content", {})
-            .get("parts", [])
-        )
-
-        text = "\n".join(
-            str(part.get("text", "")).strip()
-            for part in parts
-            if part.get("text")
-        ).strip()
-
-        if not text:
-            raise HTTPException(
-                status_code=502,
-                detail="التحليل فارغ"
-            )
-
-        return {
-            "success": True,
-            "analysis": text,
-            "model": "gemini-3.6-flash",
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as exc:
-        print("AI match analysis error:", repr(exc))
-
-        raise HTTPException(
-            status_code=502,
-            detail="حدث خطأ أثناء تحليل المباراة"
-        )
 
 app.include_router(api_router)
 

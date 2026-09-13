@@ -3,3 +3,22 @@ __pycache__/
 *.pyc
 *.backup
 server.before-*.py
+.env
+
+# --- local secrets/logs/backups ---
+.env
+*.log
+backend.log
+server.log
+backups/
+*.bak
+*.backup*
+*.json
+
+.env
+backend.log
+*.log
+backups/
+*.bak
+
+server.py.bak*
