@@ -1,6 +1,162 @@
 from dotenv import load_dotenv
 from pathlib import Path
 
+
+# === TIMEZONE FIX HELPERS (unified) ===
+import re
+from datetime import timedelta
+from fastapi import Request, Query
+try:
+    from zoneinfo import ZoneInfo  # py>=3.9
+except Exception:
+    ZoneInfo = None  # fallback
+
+_ISO_NO_TZ = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$")
+
+def _dt_to_iso_z(dt):
+    from datetime import timezone
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def _parse_dt_utc(value=None, ts=None):
+    """
+    يحول أي تمثيل وقت شائع إلى datetime واعٍ بــ UTC.
+    - يدعم: ISO مع Z/offset، ISO بدون offset (نعتبره UTC)، timestamp ثواني.
+    """
+    from datetime import datetime, timezone
+
+    if ts is not None:
+        try:
+            return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+        except Exception:
+            pass
+
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(int(value), tz=timezone.utc)
+        except Exception:
+            return None
+
+    s = str(value).strip()
+    if not s:
+        return None
+
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+
+    if _ISO_NO_TZ.match(s):
+        s = s + "+00:00"
+
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        s = s + "T00:00:00+00:00"
+
+    try:
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(timezone.utc)
+
+def _get_client_tzinfo(tz=None, tz_offset=None):
+    """
+    tz_offset: دقائق getTimezoneOffset من JS.
+    مثال الرياض: -180 => UTC+3.
+    """
+    from datetime import timezone, timedelta as _td
+
+    if tz:
+        if ZoneInfo:
+            try:
+                return ZoneInfo(tz)
+            except Exception:
+                pass
+
+    if tz_offset is not None:
+        try:
+            off = int(tz_offset)
+            return timezone(_td(minutes=-off))
+        except Exception:
+            pass
+
+    return timezone.utc
+
+def _normalize_match_time_fields(doc: dict) -> dict:
+    """يوحد kickoff/kickoff_utc/timestamp داخل الوثيقة (UTC) بدون تغيير match_date المخزن."""
+    dt_utc = _parse_dt_utc(doc.get("kickoff") or doc.get("kickoff_utc"), doc.get("timestamp"))
+    if not dt_utc:
+        return doc
+    kickoff_utc = _dt_to_iso_z(dt_utc)
+    doc["kickoff"] = kickoff_utc
+    doc["kickoff_utc"] = kickoff_utc
+    doc["timestamp"] = int(dt_utc.timestamp())
+    doc["match_date_utc"] = dt_utc.date().isoformat()
+    return doc
+
+def _decorate_match_time_fields(m: dict, tzinfo, apply_local: bool) -> dict:
+    """
+    - يضمن وجود kickoff_utc + timestamp بصيغة صحيحة
+    - عند apply_local=True: يضبط kickoff/match_date لعرض المستخدم، ويُبقي النسخ UTC أيضًا.
+    """
+    from datetime import timezone
+
+    m = dict(m)
+    dt_utc = _parse_dt_utc(m.get("kickoff") or m.get("kickoff_utc"), m.get("timestamp"))
+    if not dt_utc:
+        return m
+
+    kickoff_utc = _dt_to_iso_z(dt_utc)
+    m["kickoff_utc"] = kickoff_utc
+    m["timestamp"] = int(dt_utc.timestamp())
+    m["match_date_utc"] = dt_utc.date().isoformat()
+
+    local_dt = dt_utc.astimezone(tzinfo)
+    m["kickoff_local"] = local_dt.isoformat()
+    m["match_date_local"] = local_dt.date().isoformat()
+
+    if apply_local:
+        m["kickoff"] = m["kickoff_local"]
+        m["match_date"] = m["match_date_local"]
+    else:
+        # حافظ على kickoff كـ UTC مع Z لمنع parsing خاطئ
+        m["kickoff"] = kickoff_utc
+
+    return m
+
+
+def _request_timezone_context(request, tz=None, tz_offset=None):
+    """
+    يقرأ منطقة المستخدم من:
+    1) Query: ?tz=Asia/Riyadh&tz_offset=-180
+    2) Headers: X-Timezone / X-Timezone-Offset
+    """
+    try:
+        hdr_tz = request.headers.get("X-Timezone") if request else None
+        hdr_offset = request.headers.get("X-Timezone-Offset") if request else None
+    except Exception:
+        hdr_tz = None
+        hdr_offset = None
+
+    if tz is None and hdr_tz:
+        tz = hdr_tz
+
+    if tz_offset is None and hdr_offset:
+        try:
+            tz_offset = int(hdr_offset)
+        except Exception:
+            pass
+
+    tzinfo = _get_client_tzinfo(tz, tz_offset)
+    apply_local = (tz is not None) or (tz_offset is not None)
+
+    return tzinfo, apply_local, tz, tz_offset
+
+# === END TIMEZONE FIX HELPERS ===
+
 ROOT_DIR = Path(__file__).parent
 
 load_dotenv(ROOT_DIR / '.env')
@@ -1502,6 +1658,13 @@ class MatchModel(BaseModel):
 
     match_date: str
     kickoff: str
+    # --- timezone/display helpers (optional; backward compatible) ---
+    kickoff_utc: Optional[str] = None
+    kickoff_local: Optional[str] = None
+    match_date_utc: Optional[str] = None
+    match_date_local: Optional[str] = None
+    timestamp: Optional[int] = None
+
     competition: str = "worldcup"
     stage: str
     group_name: Optional[str] = None
@@ -2020,13 +2183,43 @@ async def get_teams():
     return merged
 
 
+
+
 # ---------- Matches ----------
 @api_router.get("/matches", response_model=List[MatchModel])
-async def list_matches(date: Optional[str] = None):
+async def list_matches(
+    request: Request,
+    date: Optional[str] = None,
+    tz: Optional[str] = Query(None),
+    tz_offset: Optional[int] = Query(None),
+):
+    # --- timezone handling (unified) ---
+    hdr_tz = request.headers.get("X-Timezone")
+    hdr_off = request.headers.get("X-Timezone-Offset")
+    if tz is None and hdr_tz:
+        tz = hdr_tz
+    if tz_offset is None and hdr_off:
+        try:
+            tz_offset = int(hdr_off)
+        except Exception:
+            pass
+    tzinfo = _get_client_tzinfo(tz, tz_offset)
+    apply_local = (tz is not None) or (tz_offset is not None)
+
     query = {}
     if date:
-        query["match_date"] = date
-
+        # نجلب اليوم المطلوب + اليوم السابق + التالي (يغطي فروقات المناطق الزمنية)
+        try:
+            from datetime import datetime as _dt
+            d0 = _dt.fromisoformat(date).date()
+            candidates = [
+                (d0 - timedelta(days=1)).isoformat(),
+                d0.isoformat(),
+                (d0 + timedelta(days=1)).isoformat(),
+            ]
+            query["match_date"] = {"$in": candidates}
+        except Exception:
+            query["match_date"] = date
     rows = await db.matches.find(query, {"_id": 0}).sort("kickoff", 1).to_list(1000)
 
     # إخفاء مباريات كأس العالم من تبويب المباريات فقط
@@ -2205,11 +2398,15 @@ async def list_matches(date: Optional[str] = None):
             )
 
         result.append(m)
-
-    return result
-
-
-
+    # --- decorate kickoff/match_date according to user timezone ---
+    decorated = []
+    for m in result:
+        mm = _decorate_match_time_fields(m, tzinfo, apply_local=apply_local)
+        if date and apply_local and mm.get("match_date") != date:
+            continue
+        decorated.append(mm)
+    decorated.sort(key=lambda x: x.get("timestamp") or 0)
+    return decorated
 # ============================================================
 # Competition duplicate protection
 # ============================================================
@@ -2674,6 +2871,7 @@ async def create_match(data: MatchCreate, _staff=Depends(require_staff)):
 
 
     try:
+        match = _normalize_match_time_fields(match)
         await db.matches.insert_one(match.copy())
         return match
     except Exception as e:
@@ -2704,10 +2902,19 @@ async def update_match(match_id: str, data: MatchUpdate, _staff=Depends(require_
             raise HTTPException(status_code=400, detail='external_fixture_id غير صالح')
         updates['external_fixture_id'] = int(raw)
         updates['external_provider'] = provider or 'fd'
-
-    # keep legacy compatibility: update kickoff_utc whenever kickoff updated
-    if "kickoff" in updates and "kickoff_utc" not in updates:
-        updates["kickoff_utc"] = updates["kickoff"]
+    # normalize kickoff => always store UTC ISO (Z) + kickoff_utc + timestamp
+    if "kickoff" in updates or "kickoff_utc" in updates:
+        raw = updates.get("kickoff") or updates.get("kickoff_utc")
+        dt = _parse_dt_utc(raw, updates.get("timestamp"))
+        if dt:
+            kickoff_utc = _dt_to_iso_z(dt)
+            updates["kickoff"] = kickoff_utc
+            updates["kickoff_utc"] = kickoff_utc
+            updates["timestamp"] = int(dt.timestamp())
+            updates["match_date_utc"] = dt.date().isoformat()
+        else:
+            if "kickoff" in updates and "kickoff_utc" not in updates:
+                updates["kickoff_utc"] = updates["kickoff"]
     if updates:
         await db.matches.update_one({"id": match_id}, {"$set": updates})
     updated = await db.matches.find_one({"id": match_id}, {"_id": 0})
@@ -4539,6 +4746,7 @@ async def football_leagues(search: Optional[str] = None):
 
 @api_router.get("/football/fixtures")
 async def football_fixtures(
+    request: Request,
     date: Optional[str] = None,
     league_id: Optional[int] = None,
     season: Optional[int] = None,
@@ -4547,8 +4755,16 @@ async def football_fixtures(
     status_short: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    tz: Optional[str] = Query(None),
+    tz_offset: Optional[int] = Query(None),
 ):
+    # توقيت المستخدم الموحد لجميع صفحات المباريات
+    tzinfo, apply_local, tz, tz_offset = _request_timezone_context(
+        request, tz, tz_offset
+    )
+
     params = {}
+
     if date:
         params["date"] = date
     if from_date:
@@ -4577,44 +4793,116 @@ async def football_fixtures(
 
     resp = payload.get("response") or []
     items = [simplify_fixture(x) for x in resp]
-    return {"count": len(items), "items": items}
+
+    # تحويل كل Fixture إلى الوقت المحلي للمستخدم مع الإبقاء على UTC.
+    decorated = [
+        _decorate_match_time_fields(item, tzinfo, apply_local)
+        for item in items
+    ]
+    decorated.sort(key=lambda x: x.get("timestamp") or 0)
+
+    return {"count": len(decorated), "items": decorated}
 
 
 @api_router.get("/football/fixtures/today")
-async def football_today():
-    today = datetime.now(timezone.utc).date().isoformat()
-    return await football_fixtures(date=today)
+async def football_today(
+    request: Request,
+    tz: Optional[str] = Query(None),
+    tz_offset: Optional[int] = Query(None),
+):
+    tzinfo, _, tz, tz_offset = _request_timezone_context(
+        request, tz, tz_offset
+    )
+
+    # اليوم حسب منطقة المستخدم وليس حسب UTC
+    today = datetime.now(tzinfo).date().isoformat()
+
+    return await football_fixtures(
+        request=request,
+        date=today,
+        tz=tz,
+        tz_offset=tz_offset,
+    )
 
 
 @api_router.get("/football/fixtures/upcoming")
-async def football_upcoming(days: int = 3):
+async def football_upcoming(
+    request: Request,
+    days: int = 3,
+    tz: Optional[str] = Query(None),
+    tz_offset: Optional[int] = Query(None),
+):
     days = max(1, min(days, 14))
-    now = datetime.now(timezone.utc).date()
-    from_date = now.isoformat()
-    to_date = (now + timedelta(days=days)).isoformat()
-    return await football_fixtures(from_date=from_date, to_date=to_date)
+
+    tzinfo, _, tz, tz_offset = _request_timezone_context(
+        request, tz, tz_offset
+    )
+
+    # الفترة القادمة حسب تاريخ المستخدم المحلي
+    now_local = datetime.now(tzinfo).date()
+    from_date = now_local.isoformat()
+    to_date = (now_local + timedelta(days=days)).isoformat()
+
+    return await football_fixtures(
+        request=request,
+        from_date=from_date,
+        to_date=to_date,
+        tz=tz,
+        tz_offset=tz_offset,
+    )
 
 
 @api_router.get("/football/fixtures/live")
-async def football_live():
-    return await football_fixtures(live=True)
+async def football_live(
+    request: Request,
+    tz: Optional[str] = Query(None),
+    tz_offset: Optional[int] = Query(None),
+):
+    return await football_fixtures(
+        request=request,
+        live=True,
+        tz=tz,
+        tz_offset=tz_offset,
+    )
 
 
 @api_router.get("/football/fixtures/finished")
-async def football_finished(date: Optional[str] = None):
-    d = date or datetime.now(timezone.utc).date().isoformat()
-    # status=FT returns finished, but some competitions use AET/PEN; for broad we fetch date and filter here
+async def football_finished(
+    request: Request,
+    date: Optional[str] = None,
+    tz: Optional[str] = Query(None),
+    tz_offset: Optional[int] = Query(None),
+):
+    tzinfo, apply_local, tz, tz_offset = _request_timezone_context(
+        request, tz, tz_offset
+    )
+
+    # استخدم يوم المستخدم المحلي عند عدم إرسال date
+    d = date or datetime.now(tzinfo).date().isoformat()
+
     payload = await cached_api_football_get(
         "/fixtures",
         {"date": d},
         ttl_seconds=60,
     )
+
     resp = payload.get("response") or []
     items = []
+
     for x in resp:
         short = ((x.get("fixture") or {}).get("status") or {}).get("short")
         if short in API_FOOTBALL_FINISHED_SHORT:
-            items.append(simplify_fixture(x))
+            fixture = simplify_fixture(x)
+            items.append(
+                _decorate_match_time_fields(
+                    fixture,
+                    tzinfo,
+                    apply_local,
+                )
+            )
+
+    items.sort(key=lambda x: x.get("timestamp") or 0)
+
     return {"count": len(items), "items": items}
 
 
@@ -6369,45 +6657,76 @@ async def on_shutdown():
 
 
 @api_router.get("/live-matches")
-async def live_matches():
+async def live_matches(
+    request: Request,
+    tz: Optional[str] = Query(None),
+    tz_offset: Optional[int] = Query(None),
+):
     now = datetime.now(timezone.utc)
+
+    tzinfo, apply_local, _, _ = _request_timezone_context(
+        request,
+        tz,
+        tz_offset,
+    )
+
     items = []
 
     cursor = db.matches.find({}).sort("kickoff", 1)
+
     async for m in cursor:
         kickoff_raw = m.get("kickoff") or m.get("kickoff_utc") or ""
         status_value = m.get("status", "scheduled")
 
-        try:
-            kickoff_dt = datetime.fromisoformat(str(kickoff_raw).replace("Z", "+00:00"))
-        except Exception:
-            kickoff_dt = None
+        kickoff_dt = _parse_dt_utc(
+            kickoff_raw,
+            m.get("timestamp"),
+        )
 
         is_live = False
         minute = None
 
         if kickoff_dt:
             diff_min = int((now - kickoff_dt).total_seconds() / 60)
+
             if 0 <= diff_min <= 130 and status_value != "finished":
                 is_live = True
                 minute = max(1, min(diff_min, 120))
 
         if is_live or status_value in ["live", "in_progress", "finished"]:
+            display_match = _decorate_match_time_fields(
+                m,
+                tzinfo,
+                apply_local,
+            )
+
             items.append({
                 "id": m.get("id"),
                 "home_team": m.get("home_team"),
                 "away_team": m.get("away_team"),
                 "home_score": m.get("home_score"),
                 "away_score": m.get("away_score"),
-                "kickoff": kickoff_raw,
+
+                # قيم العرض حسب توقيت المستخدم
+                "kickoff": display_match.get("kickoff"),
+                "match_date": display_match.get("match_date"),
+
+                # قيم مرجعية موحدة
+                "kickoff_utc": display_match.get("kickoff_utc"),
+                "kickoff_local": display_match.get("kickoff_local"),
+                "match_date_utc": display_match.get("match_date_utc"),
+                "match_date_local": display_match.get("match_date_local"),
+                "timestamp": display_match.get("timestamp"),
+
                 "status": "live" if is_live else status_value,
                 "minute": minute,
                 "stage": m.get("stage"),
                 "group_name": m.get("group_name"),
             })
 
-    return items
+    items.sort(key=lambda x: x.get("timestamp") or 0)
 
+    return items
 
 
 @api_router.post("/admin/seed-test-live")
@@ -9087,23 +9406,42 @@ async def sync_competition(
 
 @api_router.get("/competitions/{league_id}/matches")
 async def get_competition_matches(
+    request: Request,
     league_id: int,
     season: Optional[int] = None,
+    tz: Optional[str] = Query(None),
+    tz_offset: Optional[int] = Query(None),
 ):
     # إخفاء مباريات كأس العالم فقط
     if league_id == 1:
         return []
+
+    tzinfo, apply_local, _, _ = _request_timezone_context(
+        request,
+        tz,
+        tz_offset,
+    )
 
     season = await resolve_competition_season(
         league_id,
         season,
     )
 
-    return await load_competition_dataset(
+    items = await load_competition_dataset(
         league_id,
         season,
         "matches",
     )
+
+    # بيانات البطولة من API-Football / Football-Data / Highlightly
+    # تمر من نفس محول الوقت المستخدم في /api/matches.
+    decorated = [
+        _decorate_match_time_fields(item, tzinfo, apply_local)
+        for item in (items or [])
+    ]
+    decorated.sort(key=lambda x: x.get("timestamp") or 0)
+
+    return decorated
 
 
 @api_router.get("/competitions/{league_id}/standings")
